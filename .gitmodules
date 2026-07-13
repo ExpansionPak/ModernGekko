@@ -1,0 +1,5 @@
+[submodule "vendor/dolphin"]
+	path = vendor/dolphin
+	url = https://github.com/ExpansionPak/RecompCore.git
+	branch = moderngekko-runtime
+	shallow = true
