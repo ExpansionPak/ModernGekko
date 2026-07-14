@@ -1,5 +1,9 @@
 cmake_minimum_required(VERSION 3.20)
-project(ModernGekko LANGUAGES C CXX)
+if(APPLE)
+    project(ModernGekko LANGUAGES C CXX OBJCXX)
+else()
+    project(ModernGekko LANGUAGES C CXX)
+endif()
 
 include(CTest)
 include(CheckIncludeFileCXX)
@@ -64,12 +68,22 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(USE_UPNP OFF CACHE BOOL "" FORCE)
     set(ENCODE_FRAMEDUMPS OFF CACHE BOOL "" FORCE)
     set(ENABLE_LLVM OFF CACHE BOOL "" FORCE)
+    # Cubeb is Dolphin's only audio backend on macOS
+    if(APPLE)
+        set(ENABLE_CUBEB ON CACHE BOOL "" FORCE)
+    else()
+        set(ENABLE_CUBEB OFF CACHE BOOL "" FORCE)
+    endif()
     set(ENABLE_CUBEB OFF CACHE BOOL "" FORCE)
     set(ENABLE_HWDB OFF CACHE BOOL "" FORCE)
     set(ENABLE_EVDEV OFF CACHE BOOL "" FORCE)
     set(ENABLE_WAYLAND ON CACHE BOOL "" FORCE)
     set(ENABLE_EGL OFF CACHE BOOL "" FORCE)
     set(USE_SYSTEM_SDL3 OFF CACHE BOOL "" FORCE)
+    # SDL bundles its own copy of the macOS hidapi backend
+    if(APPLE)
+        set(SDL_HIDAPI OFF CACHE BOOL "" FORCE)
+    endif()
     set(LINUX_LOCAL_DEV ON CACHE BOOL "" FORCE)
     set(DISTRIBUTOR "ModernGekko" CACHE STRING "" FORCE)
     add_subdirectory(vendor/dolphin EXCLUDE_FROM_ALL)
@@ -149,6 +163,11 @@ add_library(moderngekko_dolphin_video STATIC
     vendor/dolphin_legacy/VideoCommon/UberShaderPixel.cpp
     vendor/dolphin_legacy/VideoCommon/UberShaderVertex.cpp
 )
+if(APPLE)
+    target_sources(moderngekko_dolphin_video PRIVATE
+        vendor/dolphin_legacy/Common/CommonFuncsObjC.mm)
+    target_link_libraries(moderngekko_dolphin_video PUBLIC "-framework Foundation")
+endif()
 add_library(ModernGekko::DolphinVideo ALIAS moderngekko_dolphin_video)
 set_target_properties(moderngekko_dolphin_video PROPERTIES
     CXX_STANDARD 23
@@ -180,6 +199,17 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
     )
+    if(APPLE)
+        # Dolphin's windowed backend for macOS
+        target_sources(moderngekko PRIVATE
+            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformMacos.mm)
+        set_source_files_properties(
+            vendor/dolphin/Source/Core/DolphinNoGUI/PlatformMacos.mm
+            PROPERTIES COMPILE_OPTIONS "-fobjc-arc")
+        target_link_libraries(moderngekko PRIVATE
+            "${APPKIT_LIBRARY}" "${COREFOUNDATION_LIBRARY}" "${IOK_LIBRARY}")
+        target_compile_definitions(moderngekko PRIVATE MODERNGEKKO_HAVE_COCOA=1)
+    endif()
     target_include_directories(moderngekko PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
     if(CMAKE_SIZEOF_VOID_P EQUAL 8)

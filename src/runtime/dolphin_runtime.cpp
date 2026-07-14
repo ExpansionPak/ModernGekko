@@ -154,6 +154,10 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config)
 
   if (impl->config.headless)
     impl->platform = Platform::CreateHeadlessPlatform();
+#ifdef MODERNGEKKO_HAVE_COCOA
+  else
+    impl->platform = Platform::CreateMacOSPlatform();
+#endif
 #ifdef HAVE_WAYLAND
   else if (impl->config.window_system != WindowSystem::X11)
     impl->platform = Platform::CreateWaylandPlatform();
