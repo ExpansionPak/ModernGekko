@@ -19,9 +19,9 @@ namespace fs = std::filesystem;
 
 namespace
 {
-constexpr std::string_view RECOMPCORE_REVISION = "44a5ad98d507716fa76ac4d242f8a41181dfe0eb";
+constexpr std::string_view RECOMPCORE_REVISION = "6ed835397d984f2ac8cccb89589ef592add68d71";
 constexpr std::string_view DOLRECOMP_REVISION =
-    "3606fbd226951631fd258e81fb26854ae9bbd21f";
+    "a2b02e5a515fc8971cc551ad51c9e26a9815daad-dispatch-port";
 
 struct BuildOptions
 {
@@ -323,7 +323,8 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
     std::ofstream{normalized_smc};
 
   const fs::path source_root = fs::path(MODERNGEKKO_SOURCE_DIR);
-  const unsigned compile_jobs = std::max(1u, std::thread::hardware_concurrency());
+  const unsigned compile_jobs =
+      std::min(8u, std::max(1u, std::thread::hardware_concurrency()));
   std::string configure = "cmake -E env CMAKE_NINJA_FORCE_RESPONSE_FILE=1 cmake -S " +
       Quote(source_root / "vendor/dolphin/module-template") +
       " -B " + Quote(module_build) + " -G Ninja -DCMAKE_BUILD_TYPE=Release" +

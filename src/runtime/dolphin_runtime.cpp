@@ -178,9 +178,7 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config)
   impl->controllers_initialized = true;
   impl->platform->SetTitle(impl->title);
 
-  Config::SetBase(Config::MAIN_CPU_CORE,
-                  impl->config.module.kind == ModuleSource::Kind::None ?
-                      PowerPC::DefaultCPUCore() : PowerPC::CPUCore::StaticRecomp);
+  Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::StaticRecomp);
   if (!impl->config.graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
   else if (impl->config.headless)

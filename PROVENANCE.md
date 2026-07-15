@@ -8,8 +8,7 @@ is in `LICENSE`.
 The Dolphin-derived runtime is pinned as the `vendor/dolphin` submodule:
 
 - Repository: `https://github.com/ExpansionPak/RecompCore.git`
-- RecompCore revision: `44a5ad98d507716fa76ac4d242f8a41181dfe0eb`
-- DolRecomp revision: `3606fbd226951631fd258e81fb26854ae9bbd21f`
+- RecompCore revision: `1873066167f3d03b39771b547f280d2b970427b6`
 - Branch used for local integration: `moderngekko-runtime`
 - Dolphin base immediately before StaticRecomp was introduced:
   `1ccbcaa04a95a5807d92429bf35598da345a3f16`
@@ -31,7 +30,7 @@ retained in their source trees.
 
 ModernGekko-owned integration is intentionally kept in the top-level runtime,
 frontend, tooling, tests, and build files. The RecompCore integration branch
-contains six local commits beyond `ExpansionPak/RecompCore` main:
+contains five local commits beyond `ExpansionPak/RecompCore` main:
 
 - `0fafb0f796` (`support moderngekko runtime`): explicit module-source wiring,
   StaticRecomp ABI/loader integration, Wayland NoGUI support, Vulkan surface
@@ -44,10 +43,9 @@ contains six local commits beyond `ExpansionPak/RecompCore` main:
   handling plus dual X11/Wayland SDL frontend support.
 - `1873066167` (`use DolRecomp submodule`): replaces the embedded DolRecomp
   snapshot with a pinned `ExpansionPak/DolRecomp` submodule.
-- `44a5ad98d5` (`fix native recomp execution`): keeps unsupported paths on
-  interpreter fallback, restores generated exception and cache-operation
-  handling, and bounds ThinLTO link parallelism.
 
 No Nintendo disc image, extracted game data, keys, or copyrighted game assets
 are part of either source repository. Users and testers provide their own game
 dump.
+
+Note: written by Codex. Rewrite this soon
