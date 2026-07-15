@@ -35,7 +35,7 @@ void Usage()
                " [--game <extracted-root>] [--module <path>]\n"
                "       [--user-dir <path>] [--title <text>]\n"
                "       [--graphics <backend>] [--audio <backend>]\n"
-               "       [-X11] [--headless] [--allow-interpreter]\n"
+               "       [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
                "       With no --game, boots the path in <user-dir>/default-game.txt.\n";
 }
 
@@ -118,6 +118,8 @@ int main(int argc, char** argv)
       config.audio.backend = value("--audio");
     else if (arg == "-X11" || arg == "--x11")
       config.window_system = moderngekko::WindowSystem::X11;
+    else if (arg == "--wayland")
+      config.window_system = moderngekko::WindowSystem::Wayland;
     else if (arg == "--headless")
       config.headless = true;
     else if (arg == "--allow-interpreter")

@@ -158,13 +158,13 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config)
   else
     impl->platform = Platform::CreateMacOSPlatform();
 #endif
+#ifdef HAVE_X11
+  else if (impl->config.window_system != WindowSystem::Wayland)
+    impl->platform = Platform::CreateX11Platform();
+#endif
 #ifdef HAVE_WAYLAND
   else if (impl->config.window_system != WindowSystem::X11)
     impl->platform = Platform::CreateWaylandPlatform();
-#endif
-#ifdef HAVE_X11
-  else if (impl->config.window_system == WindowSystem::X11)
-    impl->platform = Platform::CreateX11Platform();
 #endif
   if (!impl->platform || !impl->platform->Init())
   {
@@ -251,6 +251,7 @@ RuntimeRunResult Runtime::Run()
   }
   m_impl->booted = true;
   m_impl->platform->MainLoop();
+  m_impl->platform->SaveWindowGeometry();
   Core::Stop(Core::System::GetInstance());
   Core::Shutdown(Core::System::GetInstance());
   m_impl->booted = false;

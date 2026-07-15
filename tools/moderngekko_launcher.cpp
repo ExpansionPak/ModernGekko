@@ -256,12 +256,14 @@ fs::path SiblingRunner(const char* argv0)
 
 int main(int argc, char** argv)
 {
-  bool use_x11 = false;
+  bool use_wayland = false;
   std::optional<fs::path> extract_only;
   for (int i = 1; i < argc; ++i)
   {
     if (std::string_view(argv[i]) == "-X11" || std::string_view(argv[i]) == "--x11")
-      use_x11 = true;
+      use_wayland = false;
+    else if (std::string_view(argv[i]) == "--wayland")
+      use_wayland = true;
     else if (std::string_view(argv[i]) == "--extract" && i + 1 < argc)
       extract_only = argv[++i];
   }
@@ -291,8 +293,8 @@ int main(int argc, char** argv)
   std::string controller_status;
   moderngekko::frontend::ImportDolphinController(user_directory, &controller_status);
 
-  // The launcher itself is always native Wayland. -X11 only opts the game window into X11.
-  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, "wayland");
+  // X11 is the conservative default while the native Wayland path remains opt-in.
+  SDL_SetHint(SDL_HINT_VIDEO_DRIVER, use_wayland ? "wayland" : "x11");
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
     return 1;
 
@@ -509,7 +511,7 @@ int main(int argc, char** argv)
     return 1;
   std::string command = Quote(SiblingRunner(argv[0])) + " --game " + Quote(current_game) +
                         " --user-dir " + Quote(user_directory);
-  if (use_x11)
-    command += " -X11";
+  if (use_wayland)
+    command += " --wayland";
   return std::system(command.c_str()) == 0 ? 0 : 1;
 }

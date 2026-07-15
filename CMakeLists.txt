@@ -245,6 +245,14 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
             HINTS "${_moderngekko_sdk_usr}/share/wayland-protocols/unstable/xdg-decoration"
                   "/usr/share/wayland-protocols/unstable/xdg-decoration"
             REQUIRED)
+        find_file(MODERNGEKKO_IDLE_INHIBIT_XML idle-inhibit-unstable-v1.xml
+            HINTS "${_moderngekko_sdk_usr}/share/wayland-protocols/unstable/idle-inhibit"
+                  "/usr/share/wayland-protocols/unstable/idle-inhibit"
+            REQUIRED)
+        find_library(MODERNGEKKO_WAYLAND_CURSOR_LIBRARY wayland-cursor
+            HINTS "${_moderngekko_sdk_lib}" REQUIRED)
+        find_library(MODERNGEKKO_XKBCOMMON_LIBRARY xkbcommon
+            HINTS "${_moderngekko_sdk_lib}" REQUIRED)
         set(_moderngekko_wayland_generated
             "${CMAKE_CURRENT_BINARY_DIR}/generated/wayland")
         set(_moderngekko_xdg_header
@@ -255,6 +263,10 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
             "${_moderngekko_wayland_generated}/xdg-decoration-client-protocol.h")
         set(_moderngekko_decoration_code
             "${_moderngekko_wayland_generated}/xdg-decoration-protocol.c")
+        set(_moderngekko_idle_inhibit_header
+            "${_moderngekko_wayland_generated}/idle-inhibit-unstable-v1-client-protocol.h")
+        set(_moderngekko_idle_inhibit_code
+            "${_moderngekko_wayland_generated}/idle-inhibit-unstable-v1-protocol.c")
         add_custom_command(
             OUTPUT "${_moderngekko_xdg_header}" "${_moderngekko_xdg_code}"
             COMMAND "${CMAKE_COMMAND}" -E make_directory
@@ -275,10 +287,21 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
                     "${MODERNGEKKO_XDG_DECORATION_XML}" "${_moderngekko_decoration_code}"
             DEPENDS "${MODERNGEKKO_XDG_DECORATION_XML}"
             VERBATIM)
+        add_custom_command(
+            OUTPUT "${_moderngekko_idle_inhibit_header}" "${_moderngekko_idle_inhibit_code}"
+            COMMAND "${CMAKE_COMMAND}" -E make_directory
+                    "${_moderngekko_wayland_generated}"
+            COMMAND "${MODERNGEKKO_WAYLAND_SCANNER}" client-header
+                    "${MODERNGEKKO_IDLE_INHIBIT_XML}" "${_moderngekko_idle_inhibit_header}"
+            COMMAND "${MODERNGEKKO_WAYLAND_SCANNER}" private-code
+                    "${MODERNGEKKO_IDLE_INHIBIT_XML}" "${_moderngekko_idle_inhibit_code}"
+            DEPENDS "${MODERNGEKKO_IDLE_INHIBIT_XML}"
+            VERBATIM)
         target_sources(moderngekko PRIVATE
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformWayland.cpp
             "${_moderngekko_xdg_code}"
-            "${_moderngekko_decoration_code}")
+            "${_moderngekko_decoration_code}"
+            "${_moderngekko_idle_inhibit_code}")
         target_include_directories(moderngekko PRIVATE
             "${_moderngekko_wayland_generated}")
         if(MODERNGEKKO_FRONTEND_SDK)
@@ -287,6 +310,9 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         else()
             target_link_libraries(moderngekko PRIVATE PkgConfig::WAYLAND)
         endif()
+        target_link_libraries(moderngekko PRIVATE
+            "${MODERNGEKKO_WAYLAND_CURSOR_LIBRARY}"
+            "${MODERNGEKKO_XKBCOMMON_LIBRARY}")
         target_compile_definitions(moderngekko PRIVATE HAVE_WAYLAND=1)
         target_compile_definitions(videovulkan PRIVATE HAVE_WAYLAND=1)
         if(MODERNGEKKO_FRONTEND_SDK)
