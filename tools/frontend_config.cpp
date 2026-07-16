@@ -2,11 +2,7 @@
 
 #include <algorithm>
 #include <cctype>
-#include <cstdlib>
 #include <fstream>
-#include <iterator>
-#include <optional>
-#include <sstream>
 #include <string_view>
 
 namespace fs = std::filesystem;
@@ -30,73 +26,6 @@ std::string Lower(std::string value)
   return value;
 }
 
-std::optional<fs::path> FindDolphinControllerConfig()
-{
-  std::vector<fs::path> candidates;
-  if (const char* explicit_dir = std::getenv("DOLPHIN_USER_DIR"))
-  {
-    candidates.emplace_back(fs::path(explicit_dir) / "WiimoteNew.ini");
-    candidates.emplace_back(fs::path(explicit_dir) / "Config" / "WiimoteNew.ini");
-  }
-  if (const char* home = std::getenv("HOME"))
-  {
-    const fs::path root(home);
-    candidates.emplace_back(root / ".var/app/org.DolphinEmu.dolphin-emu/config/dolphin-emu/WiimoteNew.ini");
-    candidates.emplace_back(root / ".config/dolphin-emu/WiimoteNew.ini");
-    candidates.emplace_back(root / ".local/share/dolphin-emu/Config/WiimoteNew.ini");
-  }
-  for (const fs::path& candidate : candidates)
-  {
-    if (fs::is_regular_file(candidate))
-      return candidate;
-  }
-  return std::nullopt;
-}
-
-std::string NormalizeController(std::istream& input)
-{
-#ifndef MODERNGEKKO_FORCE_SIDEWAYS_WIIMOTE
-  return {std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>()};
-#else
-  std::vector<std::string> wiimote;
-  bool in_wiimote_one = false;
-  std::string line;
-  while (std::getline(input, line))
-  {
-    if (!line.empty() && line.back() == '\r')
-      line.pop_back();
-    const std::string trimmed = Trim(line);
-    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
-    {
-      in_wiimote_one = trimmed == "[Wiimote1]";
-      continue;
-    }
-    if (!in_wiimote_one || trimmed.empty())
-      continue;
-
-    const std::size_t separator = trimmed.find('=');
-    const std::string key = Trim(trimmed.substr(0, separator));
-    if (key.starts_with("Nunchuk/") || key == "Extension" ||
-        key == "Options/Sideways Wiimote")
-    {
-      continue;
-    }
-    wiimote.push_back(line);
-  }
-
-  std::ostringstream output;
-  output << "[Wiimote1]\n";
-  for (const std::string& setting : wiimote)
-    output << setting << '\n';
-  output << "Extension = None\n"
-            "Options/Sideways Wiimote = True\n"
-            "[Wiimote2]\n"
-            "[Wiimote3]\n"
-            "[Wiimote4]\n"
-            "[BalanceBoard]\n";
-  return output.str();
-#endif
-}
 }  // namespace
 
 const std::vector<ResolutionOption>& SupportedResolutions()
@@ -115,7 +44,7 @@ ConfigResult LoadConfig(const fs::path& user_directory, bool create_if_missing)
   if (!fs::exists(path) && create_if_missing)
   {
     std::string error;
-    if (!SaveConfig(user_directory, "1920x1080", true, &error))
+    if (!SaveConfig(user_directory, "1920x1080", true, {}, &error))
       return {.error = std::move(error)};
   }
 
@@ -124,6 +53,7 @@ ConfigResult LoadConfig(const fs::path& user_directory, bool create_if_missing)
     return {.error = "can't open " + path.string()};
 
   std::string resolution;
+  std::string controller;
   bool show_fps_in_title = true;
   std::string line;
   while (std::getline(file, line))
@@ -137,9 +67,12 @@ ConfigResult LoadConfig(const fs::path& user_directory, bool create_if_missing)
     if (separator == std::string::npos)
       return {.error = "invalid config.ini line: " + trimmed};
     const std::string key = Lower(Trim(trimmed.substr(0, separator)));
-    const std::string value = Lower(Trim(trimmed.substr(separator + 1)));
+    const std::string raw_value = Trim(trimmed.substr(separator + 1));
+    const std::string value = Lower(raw_value);
     if (key == "resolution")
       resolution = value;
+    else if (key == "controller")
+      controller = raw_value;
     else if (key == "show_fps_in_title")
     {
       if (value == "true" || value == "1" || value == "yes" || value == "on")
@@ -158,6 +91,7 @@ ConfigResult LoadConfig(const fs::path& user_directory, bool create_if_missing)
     if (resolution == option.text)
       return {.dolphin_scale = option.dolphin_scale,
               .resolution = std::move(resolution),
+              .controller = std::move(controller),
               .show_fps_in_title = show_fps_in_title};
   }
 
@@ -168,6 +102,7 @@ ConfigResult LoadConfig(const fs::path& user_directory, bool create_if_missing)
     if (resolution == raw)
       return {.dolphin_scale = scale,
               .resolution = std::move(resolution),
+              .controller = std::move(controller),
               .show_fps_in_title = show_fps_in_title};
   }
 
@@ -176,7 +111,7 @@ ConfigResult LoadConfig(const fs::path& user_directory, bool create_if_missing)
 }
 
 bool SaveConfig(const fs::path& user_directory, std::string_view resolution,
-                bool show_fps_in_title, std::string* error)
+                bool show_fps_in_title, std::string_view controller, std::string* error)
 {
   std::error_code ec;
   fs::create_directories(user_directory, ec);
@@ -197,38 +132,45 @@ bool SaveConfig(const fs::path& user_directory, std::string_view resolution,
           "# This is Dolphin's internal render target, not the window size.\n"
           "[Video]\n"
           "resolution=" << resolution << '\n'
-       << "show_fps_in_title=" << (show_fps_in_title ? "true" : "false") << '\n';
+       << "show_fps_in_title=" << (show_fps_in_title ? "true" : "false") << '\n'
+       << "[Input]\n"
+       << "controller=" << controller << '\n';
   return true;
 }
 
-bool ImportDolphinController(const fs::path& user_directory, std::string* message)
+std::string ReadConfiguredController(const fs::path& user_directory)
 {
+  std::ifstream input(user_directory / "Config" / "WiimoteNew.ini");
+  std::string line;
+  bool wiimote_one = false;
+  while (std::getline(input, line))
+  {
+    const std::string trimmed = Trim(line);
+    if (trimmed.starts_with('[') && trimmed.ends_with(']'))
+    {
+      wiimote_one = trimmed == "[Wiimote1]";
+      continue;
+    }
+    if (!wiimote_one)
+      continue;
+    const std::size_t separator = trimmed.find('=');
+    if (separator != std::string::npos && Trim(trimmed.substr(0, separator)) == "Device")
+      return Trim(trimmed.substr(separator + 1));
+  }
+  return {};
+}
+
+bool GenerateControllerConfig(const fs::path& user_directory, std::string_view controller,
+                              std::string* message)
+{
+  if (controller.empty() || controller.find_first_of("\r\n") != std::string_view::npos)
+  {
+    if (message)
+      *message = "select a connected SDL gamepad";
+    return false;
+  }
+
   const fs::path destination = user_directory / "Config" / "WiimoteNew.ini";
-  std::optional<fs::path> source = FindDolphinControllerConfig();
-  if (!source && fs::is_regular_file(destination))
-    source = destination;
-  if (!source)
-  {
-    if (message)
-      *message = "no Dolphin WiimoteNew.ini was found";
-    return false;
-  }
-
-  std::ifstream input(*source);
-  if (!input)
-  {
-    if (message)
-      *message = "can't open Dolphin controller profile " + source->string();
-    return false;
-  }
-  const std::string normalized = NormalizeController(input);
-  if (normalized.find("Device =") == std::string::npos)
-  {
-    if (message)
-      *message = "Dolphin controller profile has no Wiimote1 device";
-    return false;
-  }
-
   std::error_code ec;
   fs::create_directories(destination.parent_path(), ec);
   if (ec)
@@ -244,13 +186,65 @@ bool ImportDolphinController(const fs::path& user_directory, std::string* messag
       *message = "can't write " + destination.string();
     return false;
   }
-  output << normalized;
+  output << "[Wiimote1]\n"
+         << "Device = " << controller << '\n'
+         << "Buttons/A = `Shoulder L`\n"
+            "Buttons/B = `Shoulder R`\n"
+            "Buttons/1 = `Button W`\n"
+            "Buttons/2 = `Button S`\n"
+            "Buttons/- = Back\n"
+            "Buttons/+ = Start\n"
+            "Buttons/Home = Guide\n"
+            "D-Pad/Up = `Pad N`\n"
+            "D-Pad/Down = `Pad S`\n"
+            "D-Pad/Left = `Pad W`\n"
+            "D-Pad/Right = `Pad E`\n"
+            "IR/Up = `Cursor Y-`\n"
+            "IR/Down = `Cursor Y+`\n"
+            "IR/Left = `Cursor X-`\n"
+            "IR/Right = `Cursor X+`\n"
+            "Shake/X = `Trigger L`\n"
+            "Shake/Y = `Trigger R`\n"
+            "Shake/Z = `Trigger L`\n"
+            "IRPassthrough/Object 1 X = `IR Object 1 X`\n"
+            "IRPassthrough/Object 1 Y = `IR Object 1 Y`\n"
+            "IRPassthrough/Object 1 Size = `IR Object 1 Size`\n"
+            "IRPassthrough/Object 2 X = `IR Object 2 X`\n"
+            "IRPassthrough/Object 2 Y = `IR Object 2 Y`\n"
+            "IRPassthrough/Object 2 Size = `IR Object 2 Size`\n"
+            "IRPassthrough/Object 3 X = `IR Object 3 X`\n"
+            "IRPassthrough/Object 3 Y = `IR Object 3 Y`\n"
+            "IRPassthrough/Object 3 Size = `IR Object 3 Size`\n"
+            "IRPassthrough/Object 4 X = `IR Object 4 X`\n"
+            "IRPassthrough/Object 4 Y = `IR Object 4 Y`\n"
+            "IRPassthrough/Object 4 Size = `IR Object 4 Size`\n"
+            "IMUAccelerometer/Up = `Accel Up`\n"
+            "IMUAccelerometer/Down = `Accel Down`\n"
+            "IMUAccelerometer/Left = `Accel Left`\n"
+            "IMUAccelerometer/Right = `Accel Right`\n"
+            "IMUAccelerometer/Forward = `Accel Forward`\n"
+            "IMUAccelerometer/Backward = `Accel Backward`\n"
+            "IMUGyroscope/Pitch Up = `Gyro Pitch Up`\n"
+            "IMUGyroscope/Pitch Down = `Gyro Pitch Down`\n"
+            "IMUGyroscope/Roll Left = `Gyro Roll Left`\n"
+            "IMUGyroscope/Roll Right = `Gyro Roll Right`\n"
+            "IMUGyroscope/Yaw Left = `Gyro Yaw Left`\n"
+            "IMUGyroscope/Yaw Right = `Gyro Yaw Right`\n"
+            "Rumble/Motor = Motor\n"
+            "Extension = None\n"
+            "Options/Sideways Wiimote = True\n"
+            "[Wiimote2]\n"
+            "[Wiimote3]\n"
+            "[Wiimote4]\n"
+            "[BalanceBoard]\n";
+  if (!output)
+  {
+    if (message)
+      *message = "can't write " + destination.string();
+    return false;
+  }
   if (message)
-#ifdef MODERNGEKKO_FORCE_SIDEWAYS_WIIMOTE
-    *message = "imported " + source->string() + " as Sideways Wii Remote (no extension)";
-#else
-    *message = "imported " + source->string();
-#endif
+    *message = "Sideways Wii Remote mapped to " + std::string(controller);
   return true;
 }
 }  // namespace moderngekko::frontend

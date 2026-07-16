@@ -156,14 +156,15 @@ int main(int argc, char** argv)
   config.graphics.internal_resolution_scale = frontend_config.dolphin_scale;
   config.show_fps_in_title = frontend_config.show_fps_in_title;
 
-  std::string controller_message;
-  if (!moderngekko::frontend::ImportDolphinController(config.user_directory,
-                                                       &controller_message))
+  if (!frontend_config.controller.empty())
   {
-    std::cerr << "controller configuration: " << controller_message << '\n';
-  }
-  else
-  {
+    std::string controller_message;
+    if (!moderngekko::frontend::GenerateControllerConfig(
+            config.user_directory, frontend_config.controller, &controller_message))
+    {
+      std::cerr << "controller configuration: " << controller_message << '\n';
+      return 2;
+    }
     std::cout << "controller configuration: " << controller_message << '\n';
   }
 
@@ -214,6 +215,7 @@ int main(int argc, char** argv)
     std::cerr << "initialization failed: " << created.error->message << '\n';
     return 1;
   }
+  std::cout << "audio backend: " << created.runtime->GetConfig().audio.backend << '\n';
 
   std::signal(SIGINT, HandleStopSignal);
   std::signal(SIGTERM, HandleStopSignal);

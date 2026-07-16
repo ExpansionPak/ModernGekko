@@ -20,6 +20,7 @@
 #include <optional>
 #include <string>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace fs = std::filesystem;
@@ -55,6 +56,43 @@ struct DialogState
   std::optional<fs::path> selected;
   std::string error;
 };
+
+struct ControllerOption
+{
+  std::string label;
+  std::string device;
+};
+
+std::vector<ControllerOption> EnumerateControllers()
+{
+  std::vector<ControllerOption> result;
+  std::unordered_map<std::string, int> device_ids;
+  int count = 0;
+  SDL_JoystickID* joystick_ids = SDL_GetJoysticks(&count);
+  for (int i = 0; i < count; ++i)
+  {
+    const SDL_JoystickID joystick_id = joystick_ids[i];
+    const bool gamepad = SDL_IsGamepad(joystick_id);
+    const char* name_value = gamepad ? SDL_GetGamepadNameForID(joystick_id) :
+                                       SDL_GetJoystickNameForID(joystick_id);
+    const std::string name = name_value && *name_value ? name_value : "Unknown Controller";
+    const int device_id = device_ids[name]++;
+    if (!gamepad)
+      continue;
+    ControllerOption option;
+    option.label = device_id == 0 ? name : name + " (" + std::to_string(device_id + 1) + ")";
+    option.device = "SDL/" + std::to_string(device_id) + "/" + name;
+    result.emplace_back(std::move(option));
+  }
+  SDL_free(joystick_ids);
+  return result;
+}
+
+int FindController(const std::vector<ControllerOption>& controllers, std::string_view device)
+{
+  const auto found = std::ranges::find(controllers, device, &ControllerOption::device);
+  return found == controllers.end() ? -1 : static_cast<int>(found - controllers.begin());
+}
 
 fs::path DefaultUserDirectory()
 {
@@ -290,10 +328,7 @@ int main(int argc, char** argv)
                              config.error.c_str(), nullptr);
     return 2;
   }
-  std::string controller_status;
-  moderngekko::frontend::ImportDolphinController(user_directory, &controller_status);
 
-  // X11 is the conservative default while the native Wayland path remains opt-in.
   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, use_wayland ? "wayland" : "x11");
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
     return 1;
@@ -345,19 +380,73 @@ int main(int argc, char** argv)
   }
 
   DialogState dialog;
+  std::vector<ControllerOption> controllers = EnumerateControllers();
+  std::string selected_controller = config.controller;
+  if (selected_controller.empty())
+    selected_controller = moderngekko::frontend::ReadConfiguredController(user_directory);
+  int controller_index = FindController(controllers, selected_controller);
+  std::string controller_status;
+  const auto select_controller = [&](int index) {
+    std::string message;
+    if (!moderngekko::frontend::GenerateControllerConfig(user_directory,
+                                                          controllers[index].device, &message))
+    {
+      std::lock_guard lock(dialog.mutex);
+      dialog.error = std::move(message);
+      return false;
+    }
+    std::string error;
+    if (!moderngekko::frontend::SaveConfig(user_directory,
+                                           resolutions[resolution_index].text,
+                                           show_fps_in_title, controllers[index].device, &error))
+    {
+      std::lock_guard lock(dialog.mutex);
+      dialog.error = std::move(error);
+      return false;
+    }
+    selected_controller = controllers[index].device;
+    controller_status = std::move(message);
+    return true;
+  };
+  const auto refresh_controllers = [&] {
+    controllers = EnumerateControllers();
+    controller_index = FindController(controllers, selected_controller);
+    if (controller_index < 0 && !controllers.empty())
+    {
+      controller_index = 0;
+      select_controller(controller_index);
+    }
+    else if (controller_index >= 0)
+    {
+      select_controller(controller_index);
+    }
+    else
+    {
+      controller_status = "No SDL gamepad detected";
+    }
+  };
+  refresh_controllers();
   ExtractionState extraction;
   std::jthread extraction_thread;
   bool done = false;
   bool launch = false;
   while (!done)
   {
+    bool controllers_changed = false;
     SDL_Event event;
     while (SDL_PollEvent(&event))
     {
       ImGui_ImplSDL3_ProcessEvent(&event);
       if (event.type == SDL_EVENT_QUIT || event.type == SDL_EVENT_WINDOW_CLOSE_REQUESTED)
         done = true;
+      if (event.type == SDL_EVENT_JOYSTICK_ADDED || event.type == SDL_EVENT_JOYSTICK_REMOVED ||
+          event.type == SDL_EVENT_GAMEPAD_REMAPPED)
+      {
+        controllers_changed = true;
+      }
     }
+    if (controllers_changed)
+      refresh_controllers();
 
     {
       std::lock_guard lock(dialog.mutex);
@@ -372,8 +461,18 @@ int main(int argc, char** argv)
       if (extraction.finished_game)
       {
         current_game = *extraction.finished_game;
-        launch = true;
-        done = true;
+        current_metadata = moderngekko::InspectGame(current_game);
+        extraction.finished_game.reset();
+        if (controller_index >= 0)
+        {
+          launch = true;
+          done = true;
+        }
+        else
+        {
+          std::lock_guard dialog_lock(dialog.mutex);
+          dialog.error = "Connect an SDL-compatible controller before playing";
+        }
       }
     }
 
@@ -395,8 +494,16 @@ int main(int argc, char** argv)
                   current_metadata.metadata->disc_id.c_str());
       if (ImGui::Button("Play", ImVec2(180 * scale, 42 * scale)))
       {
-        launch = true;
-        done = true;
+        if (controller_index < 0)
+        {
+          std::lock_guard lock(dialog.mutex);
+          dialog.error = "Connect an SDL-compatible controller before playing";
+        }
+        else if (select_controller(controller_index))
+        {
+          launch = true;
+          done = true;
+        }
       }
     }
     else
@@ -415,7 +522,7 @@ int main(int argc, char** argv)
         {
           std::string error;
           if (moderngekko::frontend::SaveConfig(user_directory, resolutions[i].text,
-                                                show_fps_in_title, &error))
+                                                show_fps_in_title, selected_controller, &error))
             resolution_index = static_cast<int>(i);
           else
           {
@@ -432,13 +539,34 @@ int main(int argc, char** argv)
       std::string error;
       if (!moderngekko::frontend::SaveConfig(user_directory,
                                              resolutions[resolution_index].text,
-                                             show_fps_in_title, &error))
+                                             show_fps_in_title, selected_controller, &error))
       {
         show_fps_in_title = previous_show_fps_in_title;
         std::lock_guard lock(dialog.mutex);
         dialog.error = std::move(error);
       }
     }
+    ImGui::Spacing();
+    ImGui::TextUnformatted("Controller");
+    const char* controller_preview =
+        controller_index >= 0 ? controllers[controller_index].label.c_str() :
+                                "No SDL gamepad detected";
+    if (ImGui::BeginCombo("##controller", controller_preview))
+    {
+      for (std::size_t i = 0; i < controllers.size(); ++i)
+      {
+        const bool selected = controller_index == static_cast<int>(i);
+        if (ImGui::Selectable(controllers[i].label.c_str(), selected) &&
+            select_controller(static_cast<int>(i)))
+        {
+          controller_index = static_cast<int>(i);
+        }
+        if (selected)
+          ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::TextDisabled("Sideways Wii Remote layout");
     ImGui::Spacing();
     ImGui::TextUnformatted("Wii disc image");
     if (selected_image)

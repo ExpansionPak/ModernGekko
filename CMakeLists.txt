@@ -417,6 +417,14 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
 endif()
 
 if(BUILD_TESTING)
+    add_executable(moderngekko_frontend_config_test
+        tests/frontend_config_test.cpp
+        tools/frontend_config.cpp)
+    target_include_directories(moderngekko_frontend_config_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_features(moderngekko_frontend_config_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.frontend_config COMMAND moderngekko_frontend_config_test)
+
     add_executable(moderngekko_game_inspect_test tests/game_inspect_test.cpp)
     target_link_libraries(moderngekko_game_inspect_test PRIVATE ModernGekko::LegacyRuntime)
     add_test(NAME moderngekko.game_inspect COMMAND moderngekko_game_inspect_test)

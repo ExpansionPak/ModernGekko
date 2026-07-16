@@ -1,5 +1,6 @@
 #include "moderngekko/runtime.hpp"
 
+#include "AudioCommon/AudioCommon.h"
 #include "Common/Config/Config.h"
 #include "Common/HookableEvent.h"
 #include "Core/Boot/Boot.h"
@@ -19,6 +20,7 @@
 #include "moderngekko/cpu_state.h"
 #include "moderngekko/module_loader.hpp"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -204,10 +206,24 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config)
     Config::SetBase(Config::MAIN_GFX_BACKEND, std::string("Null"));
   if (impl->config.graphics.internal_resolution_scale)
     Config::SetBase(Config::GFX_EFB_SCALE, *impl->config.graphics.internal_resolution_scale);
-  if (!impl->config.audio.backend.empty())
-    Config::SetBase(Config::MAIN_AUDIO_BACKEND, impl->config.audio.backend);
-  else if (impl->config.headless)
-    Config::SetBase(Config::MAIN_AUDIO_BACKEND, std::string("No Audio Output"));
+  const std::vector<std::string> audio_backends = AudioCommon::GetSoundBackends();
+  if (impl->config.headless)
+  {
+    impl->config.audio.backend = BACKEND_NULLSOUND;
+  }
+  else if (impl->config.audio.backend.empty() ||
+           !std::ranges::contains(audio_backends, impl->config.audio.backend))
+  {
+    impl->config.audio.backend = AudioCommon::GetDefaultSoundBackend();
+    if (impl->config.audio.backend == BACKEND_NULLSOUND)
+    {
+      const auto available = std::ranges::find_if(
+          audio_backends, [](const std::string& backend) { return backend != BACKEND_NULLSOUND; });
+      if (available != audio_backends.end())
+        impl->config.audio.backend = *available;
+    }
+  }
+  Config::SetBase(Config::MAIN_AUDIO_BACKEND, impl->config.audio.backend);
   Config::SetBase(Config::MAIN_INPUT_BACKGROUND_INPUT, impl->config.input.background_input);
 
   auto& jit = Core::System::GetInstance().GetJitInterface();

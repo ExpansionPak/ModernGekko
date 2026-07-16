@@ -17,6 +17,7 @@ struct ConfigResult
 {
   int dolphin_scale = 0;
   std::string resolution;
+  std::string controller;
   bool show_fps_in_title = true;
   std::string error;
 
@@ -26,6 +27,8 @@ struct ConfigResult
 const std::vector<ResolutionOption>& SupportedResolutions();
 ConfigResult LoadConfig(const std::filesystem::path& user_directory, bool create_if_missing);
 bool SaveConfig(const std::filesystem::path& user_directory, std::string_view resolution,
-                bool show_fps_in_title, std::string* error);
-bool ImportDolphinController(const std::filesystem::path& user_directory, std::string* message);
+                bool show_fps_in_title, std::string_view controller, std::string* error);
+std::string ReadConfiguredController(const std::filesystem::path& user_directory);
+bool GenerateControllerConfig(const std::filesystem::path& user_directory,
+                              std::string_view controller, std::string* message);
 }  // namespace moderngekko::frontend
