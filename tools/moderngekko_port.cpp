@@ -408,8 +408,12 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
 
   std::string compiler;
   if (options.toolchain == "auto")
-#if defined(_WIN32)
+#if defined(_MSC_VER)
     compiler = "cl";
+#elif defined(__clang__)
+    compiler = "clang";
+#elif defined(__GNUC__)
+    compiler = "gcc";
 #else
     compiler = ReadCommand("clang --version 2>&1").empty() ? "gcc" : "clang";
 #endif
