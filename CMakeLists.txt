@@ -517,18 +517,14 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     # Dolphin static libraries still require the Host_* callbacks implemented
     # in the runtime object. Keep that object from being discarded by the
     # static linker.
-    if(MINGW)
+    if(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
+        target_link_libraries(moderngekko-launcher PRIVATE
+            "$<LINK_LIBRARY:WHOLE_ARCHIVE,moderngekko>"
+            discio core uicommon imgui ${_moderngekko_sdl_target})
+    elseif((UNIX AND NOT APPLE) OR MINGW)
         target_link_libraries(moderngekko-launcher PRIVATE
             "-Wl,--whole-archive" moderngekko "-Wl,--no-whole-archive"
             discio core uicommon imgui ${_moderngekko_sdl_target})
-    elseif(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
-        target_link_libraries(moderngekko-launcher PRIVATE
-            "$<LINK_LIBRARY:WHOLE_ARCHIVE,moderngekko>"
-            discio imgui ${_moderngekko_sdl_target})
-    elseif(UNIX AND NOT APPLE)
-        target_link_libraries(moderngekko-launcher PRIVATE
-            "-Wl,--whole-archive" moderngekko "-Wl,--no-whole-archive"
-            discio imgui ${_moderngekko_sdl_target})
     else()
         target_link_libraries(moderngekko-launcher PRIVATE
             ModernGekko::Runtime discio imgui ${_moderngekko_sdl_target})
