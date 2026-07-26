@@ -4,7 +4,7 @@
 
 int main()
 {
-  static_assert(sizeof(CPUState) == 3504u);
+  static_assert(sizeof(CPUState) == 3528u);
 
   moderngekko::LegacyRuntime runtime(true);
   const moderngekko::ModuleLoadResult loaded =

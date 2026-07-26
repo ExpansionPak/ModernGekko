@@ -22,6 +22,42 @@ option(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME
        "Build the RecompCore/Dolphin production chassis" ON)
 option(MODERNGEKKO_ENABLE_DOLPHIN_TESTS
        "Build the imported Dolphin unit-test targets" OFF)
+option(MODERNGEKKO_ENABLE_DISC_TOOL
+       "Build Dolphin's disc conversion and verification tool" OFF)
+set(MODERNGEKKO_FRONTEND_NAME "ModernGekko" CACHE STRING
+    "Branded frontend display name")
+set(MODERNGEKKO_LAUNCHER_OUTPUT_NAME "ModernGekko" CACHE STRING
+    "Launcher executable filename without a platform suffix")
+set(MODERNGEKKO_RUNNER_OUTPUT_NAME "moderngekko-run" CACHE STRING
+    "Runner executable filename without a platform suffix")
+set(MODERNGEKKO_USER_DIRECTORY_NAME "moderngekko" CACHE STRING
+    "Frontend user directory name")
+set(MODERNGEKKO_REQUIRED_DISC_ID "" CACHE STRING
+    "Required six-character disc ID for branded builds")
+set(MODERNGEKKO_REQUIRED_DOL_SHA256 "" CACHE STRING
+    "Required extracted main DOL SHA-256")
+set(MODERNGEKKO_REQUIRED_REL_SHA256 "" CACHE STRING
+    "Required extracted main REL SHA-256")
+set(MODERNGEKKO_REQUIRED_ASSETS_SHA256 "" CACHE STRING
+    "Required extracted files tree SHA-256")
+set(MODERNGEKKO_DEFAULT_WINDOW_TITLE "" CACHE STRING
+    "Fixed game window title for branded builds")
+option(MODERNGEKKO_PORTABLE_DEFAULT_GAME
+       "Read and write default-game.txt beside branded executables" OFF)
+option(MODERNGEKKO_GAMECUBE_CONTROLLERS
+       "Generate GameCube controller profiles instead of Wii Remote profiles" OFF)
+set(MODERNGEKKO_LOG_FILENAME "ModernGekko.log" CACHE STRING
+    "Runner log filename")
+set(MODERNGEKKO_DISC_PREPARER_OUTPUT_NAME "" CACHE STRING
+    "Optional adjacent disc preparation executable")
+set(MODERNGEKKO_DOL_PATCH_MANIFEST "" CACHE FILEPATH
+    "Optional expected-word DOL patch manifest bundled with the frontend")
+set(MODERNGEKKO_GAME_SETTINGS_OVERRIDE "" CACHE FILEPATH
+    "Optional game INI copied over the bundled Dolphin settings")
+set(MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID "" CACHE STRING
+    "Source disc ID accepted by the optional disc preparer")
+option(MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS
+       "Place the branded user directory in Documents" OFF)
 set(MODERNGEKKO_FRONTEND_SDK "" CACHE PATH
     "Optional non-root sysroot containing X11 and audio development packages")
 
@@ -58,7 +94,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(MODERNGEKKO_ENABLE_IMGUI_LAUNCHER ON CACHE BOOL "" FORCE)
     set(ENABLE_QT OFF CACHE BOOL "" FORCE)
     set(ENABLE_NOGUI OFF CACHE BOOL "" FORCE)
-    set(ENABLE_CLI_TOOL OFF CACHE BOOL "" FORCE)
+    set(ENABLE_CLI_TOOL ${MODERNGEKKO_ENABLE_DISC_TOOL} CACHE BOOL "" FORCE)
     set(ENABLE_TESTS ${MODERNGEKKO_ENABLE_DOLPHIN_TESTS} CACHE BOOL "" FORCE)
     set(ENABLE_AUTOUPDATE OFF CACHE BOOL "" FORCE)
     set(ENABLE_ANALYTICS OFF CACHE BOOL "" FORCE)
@@ -86,6 +122,10 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(LINUX_LOCAL_DEV ON CACHE BOOL "" FORCE)
     set(DISTRIBUTOR "ModernGekko" CACHE STRING "" FORCE)
     add_subdirectory(vendor/dolphin EXCLUDE_FROM_ALL)
+    target_sources(core PRIVATE
+        vendor/dolphin/GXRuntime/src/core/cpu_exception.c)
+    target_include_directories(core PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
     if(MODERNGEKKO_FRONTEND_SDK)
         # These two imported targets historically rely on X11 headers living
         # in the compiler's default /usr/include search path.
@@ -130,6 +170,7 @@ add_library(moderngekko_legacy STATIC
     src/memory/address_space.cpp
     src/runtime/module.cpp
     src/runtime/module_loader.cpp
+    src/runtime/mod_loader.cpp
     src/runtime/game.cpp
     src/runtime/legacy_runtime.cpp
     src/timing/event_scheduler.cpp
@@ -143,6 +184,7 @@ add_library(ModernGekko::LegacyRuntime ALIAS moderngekko_legacy)
 add_library(moderngekko STATIC
     src/runtime/module.cpp
     src/runtime/module_loader.cpp
+    src/runtime/mod_loader.cpp
     src/runtime/game.cpp
 )
 add_library(ModernGekko::Runtime ALIAS moderngekko)
@@ -366,6 +408,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         tools/netplay_compatibility.cpp
         tools/netplay_session.cpp
         tools/frontend_config.cpp
+        tools/dol_patch.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdl3.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdlrenderer3.cpp)
     target_include_directories(moderngekko-run PRIVATE
@@ -386,20 +429,84 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     else()
         target_compile_definitions(moderngekko-run PRIVATE _M_GENERIC=1)
     endif()
-    if(MODERNGEKKO_FRONTEND_SDK)
+    if(MODERNGEKKO_FRONTEND_SDK AND UNIX AND NOT APPLE AND
+       MODERNGEKKO_PORTABLE_DEFAULT_GAME)
+        set_property(TARGET moderngekko-run PROPERTY
+            BUILD_WITH_INSTALL_RPATH TRUE)
+    elseif(MODERNGEKKO_FRONTEND_SDK)
         set_property(TARGET moderngekko-run PROPERTY BUILD_RPATH
             "${_moderngekko_sdk_lib}")
     endif()
     target_link_libraries(moderngekko-run PRIVATE
         ModernGekko::Runtime core uicommon imgui ${_moderngekko_sdl_target})
+    set_target_properties(moderngekko-run PROPERTIES
+        OUTPUT_NAME "${MODERNGEKKO_RUNNER_OUTPUT_NAME}")
+    target_compile_definitions(moderngekko-run PRIVATE
+        MODERNGEKKO_RUNNER_NAME="${MODERNGEKKO_RUNNER_OUTPUT_NAME}"
+        MODERNGEKKO_USER_DIRECTORY_NAME="${MODERNGEKKO_USER_DIRECTORY_NAME}")
+    if(MODERNGEKKO_DEFAULT_WINDOW_TITLE)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_DEFAULT_WINDOW_TITLE="${MODERNGEKKO_DEFAULT_WINDOW_TITLE}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_DISC_ID)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_REQUIRED_DISC_ID="${MODERNGEKKO_REQUIRED_DISC_ID}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_DOL_SHA256)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_REQUIRED_DOL_SHA256="${MODERNGEKKO_REQUIRED_DOL_SHA256}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_REL_SHA256)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_REQUIRED_REL_SHA256="${MODERNGEKKO_REQUIRED_REL_SHA256}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_ASSETS_SHA256)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_REQUIRED_ASSETS_SHA256="${MODERNGEKKO_REQUIRED_ASSETS_SHA256}")
+    endif()
+    if(MODERNGEKKO_PORTABLE_DEFAULT_GAME)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_PORTABLE_DEFAULT_GAME=1)
+    endif()
+    if(MODERNGEKKO_GAMECUBE_CONTROLLERS)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_GAMECUBE_CONTROLLERS=1)
+    endif()
+    if(MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS=1)
+    endif()
+    if(MODERNGEKKO_DOL_PATCH_MANIFEST)
+        get_filename_component(_moderngekko_dol_patch_name
+            "${MODERNGEKKO_DOL_PATCH_MANIFEST}" NAME)
+        target_compile_definitions(moderngekko-run PRIVATE
+            MODERNGEKKO_DOL_PATCH_MANIFEST="patches/${_moderngekko_dol_patch_name}")
+    endif()
     add_custom_command(TARGET moderngekko-run POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_directory
                 "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Data/Sys"
                 "$<TARGET_FILE_DIR:moderngekko-run>/Sys")
+    if(MODERNGEKKO_DOL_PATCH_MANIFEST)
+        add_custom_command(TARGET moderngekko-run POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E make_directory
+                    "$<TARGET_FILE_DIR:moderngekko-run>/patches"
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MODERNGEKKO_DOL_PATCH_MANIFEST}"
+                    "$<TARGET_FILE_DIR:moderngekko-run>/patches/${_moderngekko_dol_patch_name}")
+    endif()
+    if(MODERNGEKKO_GAME_SETTINGS_OVERRIDE)
+        get_filename_component(_moderngekko_settings_name
+            "${MODERNGEKKO_GAME_SETTINGS_OVERRIDE}" NAME)
+        add_custom_command(TARGET moderngekko-run POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${MODERNGEKKO_GAME_SETTINGS_OVERRIDE}"
+                    "$<TARGET_FILE_DIR:moderngekko-run>/Sys/GameSettings/${_moderngekko_settings_name}")
+    endif()
 
     add_executable(moderngekko-launcher
         tools/moderngekko_launcher.cpp
         tools/frontend_config.cpp
+        tools/dol_patch.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdl3.cpp
         vendor/dolphin/Externals/imgui/imgui/backends/imgui_impl_sdlrenderer3.cpp)
     target_include_directories(moderngekko-launcher PRIVATE
@@ -425,8 +532,58 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         target_link_libraries(moderngekko-launcher PRIVATE
             ModernGekko::Runtime discio imgui ${_moderngekko_sdl_target})
     endif()
-    set_target_properties(moderngekko-launcher PROPERTIES OUTPUT_NAME "ModernGekko")
-    if(MODERNGEKKO_FRONTEND_SDK)
+    set_target_properties(moderngekko-launcher PROPERTIES
+        OUTPUT_NAME "${MODERNGEKKO_LAUNCHER_OUTPUT_NAME}")
+    target_compile_definitions(moderngekko-launcher PRIVATE
+        MODERNGEKKO_FRONTEND_NAME="${MODERNGEKKO_FRONTEND_NAME}"
+        MODERNGEKKO_RUNNER_FILENAME="${MODERNGEKKO_RUNNER_OUTPUT_NAME}"
+        MODERNGEKKO_USER_DIRECTORY_NAME="${MODERNGEKKO_USER_DIRECTORY_NAME}"
+        MODERNGEKKO_LOG_FILENAME="${MODERNGEKKO_LOG_FILENAME}")
+    if(MODERNGEKKO_REQUIRED_DISC_ID)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_REQUIRED_DISC_ID="${MODERNGEKKO_REQUIRED_DISC_ID}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_DOL_SHA256)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_REQUIRED_DOL_SHA256="${MODERNGEKKO_REQUIRED_DOL_SHA256}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_REL_SHA256)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_REQUIRED_REL_SHA256="${MODERNGEKKO_REQUIRED_REL_SHA256}")
+    endif()
+    if(MODERNGEKKO_REQUIRED_ASSETS_SHA256)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_REQUIRED_ASSETS_SHA256="${MODERNGEKKO_REQUIRED_ASSETS_SHA256}")
+    endif()
+    if(MODERNGEKKO_PORTABLE_DEFAULT_GAME)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_PORTABLE_DEFAULT_GAME=1)
+    endif()
+    if(MODERNGEKKO_GAMECUBE_CONTROLLERS)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_GAMECUBE_CONTROLLERS=1)
+    endif()
+    if(MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS=1)
+    endif()
+    if(MODERNGEKKO_DOL_PATCH_MANIFEST)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_DOL_PATCH_MANIFEST="patches/${_moderngekko_dol_patch_name}")
+    endif()
+    if(MODERNGEKKO_DISC_PREPARER_OUTPUT_NAME)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_DISC_PREPARER_FILENAME="${MODERNGEKKO_DISC_PREPARER_OUTPUT_NAME}")
+    endif()
+    if(MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID)
+        target_compile_definitions(moderngekko-launcher PRIVATE
+            MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID="${MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID}")
+    endif()
+    if(MODERNGEKKO_FRONTEND_SDK AND UNIX AND NOT APPLE AND
+       MODERNGEKKO_PORTABLE_DEFAULT_GAME)
+        set_property(TARGET moderngekko-launcher PROPERTY
+            BUILD_WITH_INSTALL_RPATH TRUE)
+    elseif(MODERNGEKKO_FRONTEND_SDK)
         set_property(TARGET moderngekko-launcher PROPERTY BUILD_RPATH
             "${_moderngekko_sdk_lib}")
     endif()
@@ -440,6 +597,10 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     target_link_libraries(moderngekko-port PRIVATE ModernGekko::Runtime)
     target_compile_definitions(moderngekko-port PRIVATE
         MODERNGEKKO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    if(DOLRECOMP_ENABLE_LLVM)
+        target_compile_definitions(moderngekko-port PRIVATE
+            MODERNGEKKO_DOLRECOMP_LLVM=1)
+    endif()
     add_dependencies(moderngekko-port dolrecomp moderngekko-run)
     add_custom_command(TARGET moderngekko-port POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
@@ -447,7 +608,39 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
                 "$<TARGET_FILE_DIR:moderngekko-port>")
 endif()
 
+if(WIN32)
+    set_target_properties(moderngekko PROPERTIES
+        OUTPUT_NAME moderngekko_runtime)
+    target_compile_definitions(moderngekko_legacy PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX)
+    target_compile_definitions(moderngekko_dolphin_video PRIVATE
+        WIN32_LEAN_AND_MEAN NOMINMAX)
+    foreach(_moderngekko_windows_target
+            moderngekko
+            moderngekko-module-info
+            moderngekko-run
+            moderngekko-launcher
+            moderngekko-port)
+        if(TARGET ${_moderngekko_windows_target})
+            target_compile_definitions(${_moderngekko_windows_target} PRIVATE
+                WIN32_LEAN_AND_MEAN NOMINMAX)
+            if(MSVC)
+                target_compile_options(${_moderngekko_windows_target} PRIVATE
+                    /Zc:preprocessor)
+            endif()
+        endif()
+    endforeach()
+endif()
+
 if(BUILD_TESTING)
+    add_executable(moderngekko_dol_patch_test
+        tests/dol_patch_test.cpp
+        tools/dol_patch.cpp)
+    target_include_directories(moderngekko_dol_patch_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_features(moderngekko_dol_patch_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.dol_patch COMMAND moderngekko_dol_patch_test)
+
     add_executable(moderngekko_frontend_config_test
         tests/frontend_config_test.cpp
         tools/frontend_config.cpp)
@@ -455,6 +648,17 @@ if(BUILD_TESTING)
         "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     target_compile_features(moderngekko_frontend_config_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.frontend_config COMMAND moderngekko_frontend_config_test)
+
+    add_executable(moderngekko_frontend_config_gamecube_test
+        tests/frontend_config_test.cpp
+        tools/frontend_config.cpp)
+    target_include_directories(moderngekko_frontend_config_gamecube_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_features(moderngekko_frontend_config_gamecube_test PRIVATE cxx_std_23)
+    target_compile_definitions(moderngekko_frontend_config_gamecube_test PRIVATE
+        MODERNGEKKO_GAMECUBE_CONTROLLERS=1)
+    add_test(NAME moderngekko.frontend_config_gamecube
+             COMMAND moderngekko_frontend_config_gamecube_test)
 
     if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
         add_executable(moderngekko_netplay_protocol_test
@@ -464,6 +668,8 @@ if(BUILD_TESTING)
             "${CMAKE_CURRENT_SOURCE_DIR}/tools"
             "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core"
             "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+        target_compile_definitions(moderngekko_netplay_protocol_test PRIVATE
+            MODERNGEKKO_NETPLAY_TEST_MOD_PATH="$<TARGET_FILE:moderngekko_test_mod>")
         if(CMAKE_SIZEOF_VOID_P EQUAL 8)
             target_compile_definitions(moderngekko_netplay_protocol_test PRIVATE _ARCH_64=1)
         else()
@@ -535,6 +741,33 @@ if(BUILD_TESTING)
                      moderngekko_missing_export_module)
     add_test(NAME moderngekko.module_loader
              COMMAND moderngekko_module_loader_test)
+
+    add_library(moderngekko_test_mod SHARED
+        tests/fixtures/test_mod.c
+    )
+    target_link_libraries(moderngekko_test_mod
+        PRIVATE ModernGekko::ABI
+    )
+    set_target_properties(moderngekko_test_mod PROPERTIES
+        PREFIX ""
+        OUTPUT_NAME "fixture.mgm"
+    )
+    add_executable(moderngekko_mod_loader_test
+        tests/mod_loader_test.cpp
+    )
+    target_link_libraries(moderngekko_mod_loader_test
+        PRIVATE ModernGekko::LegacyRuntime
+    )
+    target_compile_definitions(moderngekko_mod_loader_test
+        PRIVATE
+            MODERNGEKKO_TEST_MOD_DIR="$<TARGET_FILE_DIR:moderngekko_test_mod>"
+    )
+    add_dependencies(moderngekko_mod_loader_test moderngekko_test_mod)
+    if(TARGET moderngekko_netplay_protocol_test)
+        add_dependencies(moderngekko_netplay_protocol_test moderngekko_test_mod)
+    endif()
+    add_test(NAME moderngekko.mod_loader
+             COMMAND moderngekko_mod_loader_test)
 
     add_executable(moderngekko_cpu_primitives_test
         tests/cpu_primitives_test.cpp

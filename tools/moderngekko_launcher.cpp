@@ -1,4 +1,5 @@
 #include "frontend_config.hpp"
+#include "dol_patch.hpp"
 #include "moderngekko/game.hpp"
 #include "netplay_session.hpp"
 
@@ -42,6 +43,18 @@ namespace
 #define MODERNGEKKO_USER_DIRECTORY_NAME "moderngekko"
 #endif
 
+#ifndef MODERNGEKKO_LOG_FILENAME
+#define MODERNGEKKO_LOG_FILENAME "ModernGekko.log"
+#endif
+
+#ifdef MODERNGEKKO_GAMECUBE_CONTROLLERS
+constexpr std::string_view CONTROLLER_PROFILE_NAME = "GCPadNew.ini";
+constexpr std::string_view GENERATED_PROFILE_LABEL = "GameCube profile";
+#else
+constexpr std::string_view CONTROLLER_PROFILE_NAME = "WiimoteNew.ini";
+constexpr std::string_view GENERATED_PROFILE_LABEL = "sideways profile";
+#endif
+
 struct ExtractionState
 {
   std::atomic<bool> running{false};
@@ -65,6 +78,27 @@ struct ControllerOption
   std::string label;
   std::string device;
 };
+
+std::string RequiredGameError(const moderngekko::GameMetadata& metadata)
+{
+#ifdef MODERNGEKKO_REQUIRED_DISC_ID
+  if (metadata.disc_id != MODERNGEKKO_REQUIRED_DISC_ID)
+    return "expected disc ID " MODERNGEKKO_REQUIRED_DISC_ID ", found " + metadata.disc_id;
+#endif
+#ifdef MODERNGEKKO_REQUIRED_DOL_SHA256
+  if (metadata.dol_sha256 != MODERNGEKKO_REQUIRED_DOL_SHA256)
+    return "main DOL does not match the pinned release";
+#endif
+#ifdef MODERNGEKKO_REQUIRED_REL_SHA256
+  if (metadata.rel_sha256 != MODERNGEKKO_REQUIRED_REL_SHA256)
+    return "_Main.rel does not match the pinned release";
+#endif
+#ifdef MODERNGEKKO_REQUIRED_ASSETS_SHA256
+  if (metadata.assets_sha256 != MODERNGEKKO_REQUIRED_ASSETS_SHA256)
+    return "game assets do not match the pinned release";
+#endif
+  return {};
+}
 
 std::vector<ControllerOption> EnumerateControllers()
 {
@@ -99,6 +133,14 @@ int FindController(const std::vector<ControllerOption>& controllers, std::string
 
 fs::path DefaultUserDirectory()
 {
+#ifdef MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS
+#if defined(_WIN32)
+  if (const char* user_profile = std::getenv("USERPROFILE"))
+    return fs::path(user_profile) / "Documents" / MODERNGEKKO_USER_DIRECTORY_NAME;
+#endif
+  if (const char* home = std::getenv("HOME"))
+    return fs::path(home) / "Documents" / MODERNGEKKO_USER_DIRECTORY_NAME;
+#endif
 #if defined(_WIN32)
   if (const char* local_app_data = std::getenv("LOCALAPPDATA"))
     return fs::path(local_app_data) / MODERNGEKKO_USER_DIRECTORY_NAME;
@@ -121,28 +163,88 @@ fs::path DocumentsDirectory()
   return fs::current_path();
 }
 
-fs::path ReadDefaultGame(const fs::path& user_directory)
+fs::path ExecutableDirectory(const char* argv0)
 {
-  std::ifstream file(user_directory / "default-game.txt");
+  std::error_code ec;
+#if defined(__linux__)
+  const fs::path proc_executable = fs::read_symlink("/proc/self/exe", ec);
+  if (!ec)
+    return proc_executable.parent_path();
+  ec.clear();
+#endif
+  const fs::path executable = fs::weakly_canonical(argv0, ec);
+  return ec ? fs::current_path() : executable.parent_path();
+}
+
+fs::path SiblingExecutable(const fs::path& release_directory, std::string name)
+{
+#if defined(_WIN32)
+  name += ".exe";
+#endif
+  const fs::path sibling = release_directory / name;
+  return fs::is_regular_file(sibling) ? sibling : fs::path(name);
+}
+
+bool ApplyBundledDolPatch(const fs::path& game_root, const fs::path& release_directory,
+                          bool* changed, std::string* error)
+{
+#ifdef MODERNGEKKO_DOL_PATCH_MANIFEST
+  if (game_root.empty() || !fs::is_directory(game_root))
+  {
+    *changed = false;
+    return true;
+  }
+  return moderngekko::frontend::ApplyDolPatchManifest(
+      game_root / "sys" / "main.dol", release_directory / MODERNGEKKO_DOL_PATCH_MANIFEST,
+      changed, error);
+#else
+  *changed = false;
+  return true;
+#endif
+}
+
+fs::path DefaultGameFile(const fs::path& user_directory, const fs::path& release_directory)
+{
+#ifdef MODERNGEKKO_PORTABLE_DEFAULT_GAME
+  return release_directory / "default-game.txt";
+#else
+  return user_directory / "default-game.txt";
+#endif
+}
+
+fs::path ReadDefaultGame(const fs::path& user_directory, const fs::path& release_directory)
+{
+  std::ifstream file(DefaultGameFile(user_directory, release_directory));
   std::string value;
   std::getline(file, value);
   if (!value.empty() && value.back() == '\r')
     value.pop_back();
-  return value;
+  fs::path game(value);
+  if (game.is_relative())
+    game = release_directory / game;
+  return game;
 }
 
-bool WriteDefaultGame(const fs::path& user_directory, const fs::path& game, std::string* error)
+bool WriteDefaultGame(const fs::path& user_directory, const fs::path& release_directory,
+                      const fs::path& game, std::string* error)
 {
+  const fs::path destination = DefaultGameFile(user_directory, release_directory);
   std::error_code ec;
-  fs::create_directories(user_directory, ec);
-  std::ofstream file(user_directory / "default-game.txt", std::ios::trunc);
+  fs::create_directories(destination.parent_path(), ec);
+  std::ofstream file(destination, std::ios::trunc);
   if (!file)
   {
     if (error)
       *error = "can't save default-game.txt";
     return false;
   }
-  file << game.string() << '\n';
+  fs::path stored = game;
+#ifdef MODERNGEKKO_PORTABLE_DEFAULT_GAME
+  const fs::path relative = fs::relative(game, release_directory, ec);
+  if (!ec && !relative.empty())
+    stored = relative;
+#endif
+  file << stored.string() << '\n';
   return true;
 }
 
@@ -165,7 +267,7 @@ std::vector<fs::path> FindDiscImages()
       std::string extension = iterator->path().extension().string();
       std::ranges::transform(extension, extension.begin(),
                              [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-      if (extension == ".wbfs" || extension == ".iso")
+      if (extension == ".wbfs" || extension == ".iso" || extension == ".rvz")
         images.push_back(iterator->path());
     }
     iterator.increment(ec);
@@ -176,7 +278,71 @@ std::vector<fs::path> FindDiscImages()
   return images;
 }
 
-bool ExtractDisc(const fs::path& image, const fs::path& user_directory, ExtractionState* state)
+std::optional<fs::path> PrepareDisc(const fs::path& image, const fs::path& user_directory,
+                                    const fs::path& release_directory, ExtractionState* state,
+                                    std::string* error)
+{
+  std::unique_ptr<DiscIO::Volume> source = DiscIO::CreateVolume(image.string());
+  if (!source)
+  {
+    *error = "Dolphin rejected the selected disc image";
+    return std::nullopt;
+  }
+  const std::string source_id = source->GetGameID(source->GetGamePartition());
+#ifdef MODERNGEKKO_REQUIRED_DISC_ID
+  if (source_id == MODERNGEKKO_REQUIRED_DISC_ID)
+    return image;
+#endif
+#if defined(MODERNGEKKO_DISC_PREPARER_FILENAME) && \
+    defined(MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID) && defined(MODERNGEKKO_REQUIRED_DISC_ID)
+  if (source_id != MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID)
+  {
+    *error = "expected clean " MODERNGEKKO_ACCEPTED_SOURCE_DISC_ID " or patched "
+             MODERNGEKKO_REQUIRED_DISC_ID "; selected " + source_id;
+    return std::nullopt;
+  }
+  const fs::path output = user_directory / "Setup" / "SonicRidersTE-2.4.6.1.iso";
+  std::error_code ec;
+  fs::create_directories(output.parent_path(), ec);
+  if (ec)
+  {
+    *error = "can't create setup directory: " + ec.message();
+    return std::nullopt;
+  }
+  {
+    std::lock_guard lock(state->mutex);
+    state->status = "Applying Tournament Edition 2.4.6.1";
+  }
+  const fs::path preparer =
+      SiblingExecutable(release_directory, MODERNGEKKO_DISC_PREPARER_FILENAME);
+  const std::array<std::string, 5> storage = {
+      preparer.string(), "--input", image.string(), "--output", output.string()};
+  std::array<const char*, 6> arguments{};
+  for (std::size_t i = 0; i < storage.size(); ++i)
+    arguments[i] = storage[i].c_str();
+  SDL_Process* process = SDL_CreateProcess(arguments.data(), false);
+  if (!process)
+  {
+    *error = "can't start Tournament Edition patcher: " + std::string(SDL_GetError());
+    return std::nullopt;
+  }
+  int exit_code = 1;
+  const bool waited = SDL_WaitProcess(process, true, &exit_code);
+  SDL_DestroyProcess(process);
+  if (!waited || exit_code != 0)
+  {
+    *error = "Tournament Edition patching failed";
+    return std::nullopt;
+  }
+  return output;
+#else
+  *error = "this disc is not the pinned patched release";
+  return std::nullopt;
+#endif
+}
+
+bool ExtractDisc(const fs::path& image, const fs::path& user_directory,
+                 const fs::path& release_directory, ExtractionState* state)
 {
   auto fail = [&](std::string message)
   {
@@ -190,9 +356,14 @@ bool ExtractDisc(const fs::path& image, const fs::path& user_directory, Extracti
     std::lock_guard lock(state->mutex);
     state->status = "Opening " + image.filename().string();
   }
-  std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(image.string());
+  std::string preparation_error;
+  const std::optional<fs::path> prepared =
+      PrepareDisc(image, user_directory, release_directory, state, &preparation_error);
+  if (!prepared)
+    return fail(std::move(preparation_error));
+  std::unique_ptr<DiscIO::Volume> volume = DiscIO::CreateVolume(prepared->string());
   if (!volume)
-    return fail("Dolphin rejected the selected WBFS/ISO");
+    return fail("Dolphin rejected the prepared disc image");
 
   const DiscIO::Partition partition = volume->GetGamePartition();
   const DiscIO::FileSystem* filesystem = volume->GetFileSystem(partition);
@@ -207,12 +378,26 @@ bool ExtractDisc(const fs::path& image, const fs::path& user_directory, Extracti
     return fail("this frontend requires disc ID " MODERNGEKKO_REQUIRED_DISC_ID "; selected " +
                 disc_id);
 #endif
+#ifdef MODERNGEKKO_PORTABLE_DEFAULT_GAME
+  const fs::path games_directory = release_directory;
+  const fs::path output = games_directory / "Game";
+#else
   const fs::path games_directory = user_directory / "games";
   const fs::path output = games_directory / disc_id;
-  if (moderngekko::InspectGame(output))
+#endif
+  std::error_code ec;
+  if (fs::is_directory(output, ec))
+  {
+    bool changed = false;
+    std::string patch_error;
+    if (!ApplyBundledDolPatch(output, release_directory, &changed, &patch_error))
+      return fail("existing extraction patching failed: " + patch_error);
+  }
+  const auto existing = moderngekko::InspectGame(output);
+  if (existing && RequiredGameError(*existing.metadata).empty())
   {
     std::string error;
-    if (!WriteDefaultGame(user_directory, output, &error))
+    if (!WriteDefaultGame(user_directory, release_directory, output, &error))
       return fail(error);
     std::lock_guard lock(state->mutex);
     state->finished_game = output;
@@ -222,7 +407,6 @@ bool ExtractDisc(const fs::path& image, const fs::path& user_directory, Extracti
   }
 
   const fs::path staging = games_directory / (disc_id + ".extracting");
-  std::error_code ec;
   fs::remove_all(staging, ec);
   fs::create_directories(staging / "files", ec);
   if (ec)
@@ -253,11 +437,25 @@ bool ExtractDisc(const fs::path& image, const fs::path& user_directory, Extracti
                             return false;
                           });
 
+  bool dol_changed = false;
+  std::string dol_patch_error;
+  if (!ApplyBundledDolPatch(staging, release_directory, &dol_changed, &dol_patch_error))
+  {
+    fs::remove_all(staging, ec);
+    return fail("extracted DOL patching failed: " + dol_patch_error);
+  }
+
   const auto inspected = moderngekko::InspectGame(staging);
   if (!inspected)
   {
     fs::remove_all(staging, ec);
     return fail("extracted game validation failed: " + inspected.error);
+  }
+  if (const std::string identity_error = RequiredGameError(*inspected.metadata);
+      !identity_error.empty())
+  {
+    fs::remove_all(staging, ec);
+    return fail("extracted game validation failed: " + identity_error);
   }
 
   fs::remove_all(output, ec);
@@ -266,7 +464,7 @@ bool ExtractDisc(const fs::path& image, const fs::path& user_directory, Extracti
   if (ec)
     return fail("can't publish extracted game: " + ec.message());
   std::string error;
-  if (!WriteDefaultGame(user_directory, output, &error))
+  if (!WriteDefaultGame(user_directory, release_directory, output, &error))
     return fail(error);
 
   {
@@ -316,11 +514,13 @@ int main(int argc, char** argv)
   }
 
   const fs::path user_directory = DefaultUserDirectory();
+  const fs::path release_directory = ExecutableDirectory(argv[0]);
   if (extract_only)
   {
     ExtractionState extraction;
     extraction.running = true;
-    const bool success = ExtractDisc(*extract_only, user_directory, &extraction);
+    const bool success =
+        ExtractDisc(*extract_only, user_directory, release_directory, &extraction);
     std::lock_guard lock(extraction.mutex);
     if (!success)
       std::cerr << "extraction failed: " << extraction.error << '\n';
@@ -341,6 +541,7 @@ int main(int argc, char** argv)
 #if defined(__linux__)
   SDL_SetHint(SDL_HINT_VIDEO_DRIVER, use_wayland ? "wayland" : "x11");
 #endif
+  SDL_setenv_unsafe("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1", 0);
   if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_GAMEPAD))
     return 1;
 
@@ -379,10 +580,21 @@ int main(int argc, char** argv)
 
   std::vector<fs::path> images = FindDiscImages();
   std::optional<fs::path> selected_image = images.empty() ? std::nullopt : std::optional(images[0]);
-  fs::path current_game = ReadDefaultGame(user_directory);
-  auto current_metadata = moderngekko::InspectGame(current_game);
+  fs::path current_game = ReadDefaultGame(user_directory, release_directory);
+  bool current_dol_changed = false;
+  std::string current_dol_error;
+  auto current_metadata =
+      ApplyBundledDolPatch(current_game, release_directory, &current_dol_changed,
+                           &current_dol_error) ?
+          moderngekko::InspectGame(current_game) :
+          moderngekko::GameInspectResult{{}, current_dol_error};
+  if (current_metadata && !RequiredGameError(*current_metadata.metadata).empty())
+    current_metadata = {{}, RequiredGameError(*current_metadata.metadata)};
   const auto& resolutions = moderngekko::frontend::SupportedResolutions();
+  const auto& graphics_backends =
+      moderngekko::frontend::SupportedGraphicsBackends();
   bool show_fps_in_title = config.show_fps_in_title;
+  bool fullscreen = config.fullscreen;
   std::array<char, 31> netplay_nickname{};
   std::array<char, 256> netplay_address{};
   std::snprintf(netplay_nickname.data(), netplay_nickname.size(), "%s",
@@ -397,6 +609,12 @@ int main(int argc, char** argv)
   {
     if (config.resolution == resolutions[i].text)
       resolution_index = static_cast<int>(i);
+  }
+  int graphics_backend_index = 0;
+  for (std::size_t i = 0; i < graphics_backends.size(); ++i)
+  {
+    if (config.graphics_backend == graphics_backends[i].value)
+      graphics_backend_index = static_cast<int>(i);
   }
 
   DialogState dialog;
@@ -428,6 +646,10 @@ int main(int argc, char** argv)
     }
     selected_controller = controllers[index].device;
     configured_controllers = {selected_controller};
+    config.controller = selected_controller;
+    config.controllers = configured_controllers;
+    config.resolution = resolutions[resolution_index].text;
+    config.show_fps_in_title = show_fps_in_title;
     controller_profile_exists = true;
     controller_status = std::move(message);
     return true;
@@ -441,12 +663,13 @@ int main(int argc, char** argv)
       if (configured_controllers.empty())
       {
         std::lock_guard lock(dialog.mutex);
-        dialog.error = "WiimoteNew.ini has no configured Wii Remote device";
+        dialog.error = std::string(CONTROLLER_PROFILE_NAME) +
+                       " has no configured controller device";
         return false;
       }
       selected_controller = configured_controllers.front();
       controller_index = FindController(controllers, selected_controller);
-      controller_status = "Using existing WiimoteNew.ini";
+      controller_status = "Using existing " + std::string(CONTROLLER_PROFILE_NAME);
       return true;
     }
     if (controller_index < 0)
@@ -475,7 +698,7 @@ int main(int argc, char** argv)
     }
     else
     {
-      controller_status = "Using existing WiimoteNew.ini";
+      controller_status = "Using existing " + std::string(CONTROLLER_PROFILE_NAME);
     }
   };
   refresh_controllers();
@@ -522,6 +745,8 @@ int main(int argc, char** argv)
       {
         current_game = *extraction.finished_game;
         current_metadata = moderngekko::InspectGame(current_game);
+        if (current_metadata && !RequiredGameError(*current_metadata.metadata).empty())
+          current_metadata = {{}, RequiredGameError(*current_metadata.metadata)};
         extraction.finished_game.reset();
         if (ensure_controller())
         {
@@ -618,6 +843,55 @@ int main(int argc, char** argv)
     }
 
     ImGui::Spacing();
+    ImGui::TextUnformatted("Graphics backend");
+    if (ImGui::BeginCombo("##graphics_backend",
+                          graphics_backends[graphics_backend_index].text))
+    {
+      for (std::size_t i = 0; i < graphics_backends.size(); ++i)
+      {
+        const bool selected = graphics_backend_index == static_cast<int>(i);
+        if (ImGui::Selectable(graphics_backends[i].text, selected))
+        {
+          const std::string previous = config.graphics_backend;
+          config.graphics_backend = graphics_backends[i].value;
+          config.resolution = resolutions[resolution_index].text;
+          config.show_fps_in_title = show_fps_in_title;
+          config.controller = selected_controller;
+          std::string error;
+          if (moderngekko::frontend::SaveConfig(user_directory, config, &error))
+          {
+            graphics_backend_index = static_cast<int>(i);
+          }
+          else
+          {
+            config.graphics_backend = previous;
+            std::lock_guard lock(dialog.mutex);
+            dialog.error = std::move(error);
+          }
+        }
+        if (selected)
+          ImGui::SetItemDefaultFocus();
+      }
+      ImGui::EndCombo();
+    }
+    ImGui::Spacing();
+    const bool previous_fullscreen = fullscreen;
+    if (ImGui::Checkbox("Start in fullscreen", &fullscreen))
+    {
+      config.fullscreen = fullscreen;
+      config.resolution = resolutions[resolution_index].text;
+      config.show_fps_in_title = show_fps_in_title;
+      config.controller = selected_controller;
+      std::string error;
+      if (!moderngekko::frontend::SaveConfig(user_directory, config, &error))
+      {
+        fullscreen = previous_fullscreen;
+        config.fullscreen = previous_fullscreen;
+        std::lock_guard lock(dialog.mutex);
+        dialog.error = std::move(error);
+      }
+    }
+    ImGui::Spacing();
     ImGui::TextUnformatted("Internal resolution (Dolphin EFB upscale)");
     if (ImGui::BeginCombo("##resolution", resolutions[resolution_index].text))
     {
@@ -629,7 +903,10 @@ int main(int argc, char** argv)
           std::string error;
           if (moderngekko::frontend::SaveConfig(user_directory, resolutions[i].text,
                                                 show_fps_in_title, selected_controller, &error))
+          {
             resolution_index = static_cast<int>(i);
+            config.resolution = resolutions[i].text;
+          }
           else
           {
             std::lock_guard lock(dialog.mutex);
@@ -650,6 +927,10 @@ int main(int argc, char** argv)
         std::lock_guard lock(dialog.mutex);
         dialog.error = std::move(error);
       }
+      else
+      {
+        config.show_fps_in_title = show_fps_in_title;
+      }
     }
     ImGui::Spacing();
     ImGui::TextUnformatted("Controller profile");
@@ -666,8 +947,10 @@ int main(int argc, char** argv)
         {
           controller_index = static_cast<int>(i);
           selected_controller = controllers[i].device;
-          controller_status = controller_profile_exists ? "Existing WiimoteNew.ini unchanged"
-                                                        : "Ready to generate controller profile";
+          controller_status =
+              controller_profile_exists
+                  ? "Existing " + std::string(CONTROLLER_PROFILE_NAME) + " unchanged"
+                  : "Ready to generate controller profile";
         }
         if (selected)
           ImGui::SetItemDefaultFocus();
@@ -675,7 +958,9 @@ int main(int argc, char** argv)
       ImGui::EndCombo();
     }
     ImGui::BeginDisabled(controller_index < 0);
-    if (ImGui::Button("Replace with generated sideways profile"))
+    const std::string replace_profile =
+        "Replace with generated " + std::string(GENERATED_PROFILE_LABEL);
+    if (ImGui::Button(replace_profile.c_str()))
       select_controller(controller_index);
     ImGui::EndDisabled();
     ImGui::Spacing();
@@ -694,18 +979,21 @@ int main(int argc, char** argv)
       ImGui::SliderInt("Buffer frames", &manual_buffer, 1, 20);
     }
     ImGui::Spacing();
-    ImGui::TextUnformatted("Wii disc image");
+    ImGui::TextUnformatted("Game disc image");
     if (selected_image)
       ImGui::TextWrapped("%s", selected_image->string().c_str());
     else
-      ImGui::TextDisabled("No WBFS or ISO selected");
+      ImGui::TextDisabled("No ISO, WBFS, or RVZ selected");
 
     if (!extraction.running)
     {
-      if (ImGui::Button("Browse for WBFS / ISO"))
+      if (ImGui::Button("Browse for ISO / WBFS / RVZ"))
       {
         static constexpr SDL_DialogFileFilter filters[] = {
-            {"Wii disc images", "wbfs;iso"}, {"WBFS", "wbfs"}, {"ISO", "iso"}};
+            {"Disc images", "iso;wbfs;rvz"},
+            {"ISO", "iso"},
+            {"WBFS", "wbfs"},
+            {"RVZ", "rvz"}};
         const std::string documents = DocumentsDirectory().string();
         SDL_ShowOpenFileDialog(FileDialogCallback, &dialog, window, filters,
                                static_cast<int>(std::size(filters)), documents.c_str(), false);
@@ -724,8 +1012,11 @@ int main(int argc, char** argv)
             extraction.finished_game.reset();
           }
           const fs::path image = *selected_image;
-          extraction_thread = std::jthread([image, user_directory, &extraction]
-                                           { ExtractDisc(image, user_directory, &extraction); });
+          extraction_thread = std::jthread([image, user_directory, release_directory, &extraction]
+                                           {
+                                             ExtractDisc(image, user_directory,
+                                                         release_directory, &extraction);
+                                           });
         }
       }
     }
@@ -768,7 +1059,8 @@ int main(int argc, char** argv)
   if (launch_mode != LaunchMode::None)
   {
     std::string launch_error;
-    if (!WriteDefaultGame(user_directory, current_game, &launch_error))
+    if (!WriteDefaultGame(user_directory, release_directory, current_game,
+                          &launch_error))
     {
       SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Launch failed", launch_error.c_str(), window);
       result = 1;
@@ -801,12 +1093,17 @@ int main(int argc, char** argv)
       }
       if (use_wayland)
         argument_storage.emplace_back("--wayland");
+#if defined(__linux__)
+      else
+        argument_storage.emplace_back("-X11");
+#endif
       std::vector<const char*> arguments;
       arguments.reserve(argument_storage.size() + 1);
       for (const std::string& argument : argument_storage)
         arguments.push_back(argument.c_str());
       arguments.push_back(nullptr);
-      const std::filesystem::path log_path = user_directory / "Logs" / "KirbyRecomp.log";
+      const std::filesystem::path log_path =
+          user_directory / "Logs" / MODERNGEKKO_LOG_FILENAME;
       std::error_code log_error;
       std::filesystem::create_directories(log_path.parent_path(), log_error);
       SDL_IOStream* log_stream =

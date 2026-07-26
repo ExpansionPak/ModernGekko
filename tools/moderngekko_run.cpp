@@ -1,4 +1,5 @@
 #include "frontend_config.hpp"
+#include "dol_patch.hpp"
 #include "moderngekko/game.hpp"
 #include "moderngekko/runtime.hpp"
 #include "netplay_session.hpp"
@@ -33,6 +34,7 @@ void Usage() {
                " [--game <extracted-root>] [--module <path>]\n"
                "       [--user-dir <path>] [--title <text>]\n"
                "       [--graphics <backend>] [--audio <backend>]\n"
+               "       [--mods <directory>] [--no-mods]\n"
                "       [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
                "       [--netplay-host | --netplay-join <host>] "
                "[--netplay-port <port>]\n"
@@ -43,16 +45,37 @@ void Usage() {
 }
 
 std::filesystem::path
-ReadDefaultGame(const std::filesystem::path &user_directory) {
-  std::ifstream file(user_directory / "default-game.txt");
+ReadDefaultGame(const std::filesystem::path &user_directory,
+                const std::filesystem::path &executable_directory) {
+#ifdef MODERNGEKKO_PORTABLE_DEFAULT_GAME
+  const std::filesystem::path default_file =
+      executable_directory / "default-game.txt";
+#else
+  const std::filesystem::path default_file =
+      user_directory / "default-game.txt";
+#endif
+  std::ifstream file(default_file);
   std::string path;
   std::getline(file, path);
   if (!path.empty() && path.back() == '\r')
     path.pop_back();
-  return path;
+  std::filesystem::path result(path);
+  if (result.is_relative())
+    result = executable_directory / result;
+  return result;
 }
 
 std::filesystem::path DefaultUserDirectory() {
+#ifdef MODERNGEKKO_USER_DIRECTORY_IN_DOCUMENTS
+#if defined(_WIN32)
+  if (const char *user_profile = std::getenv("USERPROFILE"))
+    return std::filesystem::path(user_profile) / "Documents" /
+           MODERNGEKKO_USER_DIRECTORY_NAME;
+#endif
+  if (const char *home = std::getenv("HOME"))
+    return std::filesystem::path(home) / "Documents" /
+           MODERNGEKKO_USER_DIRECTORY_NAME;
+#endif
 #if defined(_WIN32)
   if (const char *local_app_data = std::getenv("LOCALAPPDATA"))
     return std::filesystem::path(local_app_data) /
@@ -92,12 +115,21 @@ std::filesystem::path ExecutableDirectory(const char *argv0) {
 } // namespace
 
 int RunMain(int argc, char **argv) {
+#if defined(_WIN32)
+  if (!std::getenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD"))
+    _putenv_s("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1");
+#else
+  setenv("SDL_GAMECONTROLLER_ALLOW_STEAM_VIRTUAL_GAMEPAD", "1", 0);
+#endif
   moderngekko::RuntimeConfig config;
   config.user_directory = DefaultUserDirectory();
+  const std::filesystem::path executable_directory =
+      ExecutableDirectory(argv[0]);
 #ifdef MODERNGEKKO_DEFAULT_WINDOW_TITLE
   config.window_title = MODERNGEKKO_DEFAULT_WINDOW_TITLE;
 #endif
   std::filesystem::path module_path;
+  bool use_default_mods = true;
   std::optional<moderngekko::frontend::NetplayRole> netplay_role;
   std::string netplay_address;
   std::optional<std::uint16_t> netplay_port;
@@ -125,6 +157,10 @@ int RunMain(int argc, char **argv) {
       config.graphics.backend = value("--graphics");
     else if (arg == "--audio")
       config.audio.backend = value("--audio");
+    else if (arg == "--mods")
+      config.mod_directories.emplace_back(value("--mods"));
+    else if (arg == "--no-mods")
+      use_default_mods = false;
     else if (arg == "-X11" || arg == "--x11")
       config.window_system = moderngekko::WindowSystem::X11;
     else if (arg == "--wayland")
@@ -166,7 +202,8 @@ int RunMain(int argc, char **argv) {
     }
   }
   if (config.game_root.empty())
-    config.game_root = ReadDefaultGame(config.user_directory);
+    config.game_root =
+        ReadDefaultGame(config.user_directory, executable_directory);
   if (config.game_root.empty()) {
     std::cerr << "no game configured; use --game once or create "
               << (config.user_directory / "default-game.txt") << '\n';
@@ -181,7 +218,14 @@ int RunMain(int argc, char **argv) {
     return 2;
   }
   config.graphics.internal_resolution_scale = frontend_config.dolphin_scale;
+  if (config.graphics.backend.empty())
+    config.graphics.backend = frontend_config.graphics_backend;
+  config.fullscreen = frontend_config.fullscreen;
   config.show_fps_in_title = frontend_config.show_fps_in_title;
+  if (use_default_mods) {
+    config.mod_directories.push_back(executable_directory / "Mods");
+    config.mod_directories.push_back(config.user_directory / "Mods");
+  }
 
   if (!netplay_role && !frontend_config.controller.empty()) {
     std::string controller_message;
@@ -194,6 +238,19 @@ int RunMain(int argc, char **argv) {
     std::cout << "controller configuration: " << controller_message << '\n';
   }
 
+#ifdef MODERNGEKKO_DOL_PATCH_MANIFEST
+  bool dol_changed = false;
+  std::string dol_patch_error;
+  if (!moderngekko::frontend::ApplyDolPatchManifest(
+          config.game_root / "sys" / "main.dol",
+          executable_directory / MODERNGEKKO_DOL_PATCH_MANIFEST, &dol_changed,
+          &dol_patch_error)) {
+    std::cerr << "DOL patching failed: " << dol_patch_error << '\n';
+    return 2;
+  }
+  if (dol_changed)
+    std::cout << "Applied native DOL patches\n";
+#endif
   const auto inspected = moderngekko::InspectGame(config.game_root);
   if (!inspected) {
     std::cerr << "invalid game: " << inspected.error << '\n';
@@ -208,6 +265,25 @@ int RunMain(int argc, char **argv) {
     return 2;
   }
 #endif
+#ifdef MODERNGEKKO_REQUIRED_DOL_SHA256
+  if (inspected.metadata->dol_sha256 != MODERNGEKKO_REQUIRED_DOL_SHA256) {
+    std::cerr << "unsupported main DOL: this release requires its pinned game build\n";
+    return 2;
+  }
+#endif
+#ifdef MODERNGEKKO_REQUIRED_REL_SHA256
+  if (inspected.metadata->rel_sha256 != MODERNGEKKO_REQUIRED_REL_SHA256) {
+    std::cerr << "unsupported _Main.rel: this release requires its pinned game build\n";
+    return 2;
+  }
+#endif
+#ifdef MODERNGEKKO_REQUIRED_ASSETS_SHA256
+  if (inspected.metadata->assets_sha256 !=
+      MODERNGEKKO_REQUIRED_ASSETS_SHA256) {
+    std::cerr << "unsupported game assets: this release requires its pinned game build\n";
+    return 2;
+  }
+#endif
 
   // Compatibility discovery belongs to the runner, never the runtime library.
   if (module_path.empty()) {
@@ -216,7 +292,7 @@ int RunMain(int argc, char **argv) {
     else {
       const std::string module_name =
           "g" + inspected.metadata->disc_id + "_recomp" + LibrarySuffix();
-      const auto bundled = ExecutableDirectory(argv[0]) / module_name;
+      const auto bundled = executable_directory / module_name;
       const auto user_module =
           config.user_directory / "StaticRecompModules" / module_name;
       if (std::filesystem::is_regular_file(bundled))

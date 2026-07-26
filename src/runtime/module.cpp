@@ -67,6 +67,42 @@ static bool address_is_covered(const ModernGekkoRange* ranges, uint32_t count, u
     return false;
 }
 
+static bool rel_modules_are_valid(const ModernGekkoModuleDesc* descriptor)
+{
+    uint32_t module_index;
+
+    if (descriptor->num_rel_modules == 0u)
+        return descriptor->rel_modules == NULL;
+    if (descriptor->rel_modules == NULL)
+        return false;
+    for (module_index = 0; module_index < descriptor->num_rel_modules; ++module_index)
+    {
+        const ModernGekkoRelModule* module = &descriptor->rel_modules[module_index];
+        uint32_t section_index;
+        if (module->module_id == 0u || module->section_count == 0u ||
+            module->section_info_offset < 0x40u || module->file_size < 0x40u ||
+            module->sections == NULL || module->num_sections == 0u)
+        {
+            return false;
+        }
+        for (section_index = 0; section_index < module->num_sections; ++section_index)
+        {
+            const ModernGekkoRelSection* section = &module->sections[section_index];
+            uint64_t end = (uint64_t)section->linked_start + section->size;
+            if (section->module_id != module->module_id ||
+                section->section_index >= module->section_count || section->size == 0u ||
+                end > 0x100000000ull ||
+                !address_is_covered(descriptor->code_ranges,
+                                    descriptor->num_code_ranges,
+                                    section->linked_start))
+            {
+                return false;
+            }
+        }
+    }
+    return true;
+}
+
 ModernGekkoModuleStatus moderngekko_validate_module(
     const ModernGekkoModuleDesc* descriptor,
     const ModernGekkoModuleRequirements* requirements)
@@ -100,6 +136,8 @@ ModernGekkoModuleStatus moderngekko_validate_module(
     }
     if (!chunks_tile_code(descriptor))
         return MODERNGEKKO_MODULE_INVALID_CHUNKS;
+    if (!rel_modules_are_valid(descriptor))
+        return MODERNGEKKO_MODULE_INVALID_REL_MODULES;
     if (!address_is_covered(descriptor->code_ranges, descriptor->num_code_ranges,
                             descriptor->entry_point))
         return MODERNGEKKO_MODULE_ENTRY_POINT_UNCOVERED;
@@ -122,6 +160,7 @@ const char* moderngekko_module_status_string(ModernGekkoModuleStatus status)
         "invalid SMC ranges",
         "invalid chunks",
         "entry point is not covered by code ranges",
+        "invalid REL module metadata",
     };
 
     if ((unsigned)status >= sizeof(messages) / sizeof(messages[0]))

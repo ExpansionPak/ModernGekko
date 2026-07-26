@@ -33,7 +33,7 @@ int main()
 {
   moderngekko::ModuleLibrary library;
   ModernGekkoModuleRequirements requirements = {
-      2u,
+      MODERNGEKKO_CPU_ABI_VERSION,
       sizeof(CPUState),
       "TEST01",
   };

@@ -9,7 +9,7 @@
 extern "C" {
 #endif
 
-#define MODERNGEKKO_MODULE_ABI_VERSION 2u
+#define MODERNGEKKO_MODULE_ABI_VERSION 3u
 #define MODERNGEKKO_GET_MODULE_SYMBOL "staticrecomp_get_module"
 
 #if defined(_WIN32)
@@ -25,6 +25,25 @@ typedef struct ModernGekkoRange
     uint32_t start;
     uint32_t end;
 } ModernGekkoRange;
+
+typedef struct ModernGekkoRelSection
+{
+    uint32_t module_id;
+    uint32_t section_index;
+    uint32_t linked_start;
+    uint32_t size;
+} ModernGekkoRelSection;
+
+typedef struct ModernGekkoRelModule
+{
+    uint32_t module_id;
+    uint32_t version;
+    uint32_t section_count;
+    uint32_t section_info_offset;
+    uint32_t file_size;
+    const ModernGekkoRelSection* sections;
+    uint32_t num_sections;
+} ModernGekkoRelModule;
 
 typedef struct ModernGekkoModuleDesc
 {
@@ -44,11 +63,15 @@ typedef struct ModernGekkoModuleDesc
     const ModernGekkoRange* chunk_ranges;
     uint32_t num_chunk_ranges;
     const uint64_t* chunk_hashes;
+    const ModernGekkoRelModule* rel_modules;
+    uint32_t num_rel_modules;
 } ModernGekkoModuleDesc;
 
 typedef const ModernGekkoModuleDesc* (*ModernGekkoGetModuleFn)(void);
 
 typedef ModernGekkoRange StaticRecompRange;
+typedef ModernGekkoRelSection StaticRecompRelSection;
+typedef ModernGekkoRelModule StaticRecompRelModule;
 typedef ModernGekkoModuleDesc StaticRecompModuleDesc;
 typedef ModernGekkoGetModuleFn StaticRecompGetModuleFn;
 

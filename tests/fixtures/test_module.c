@@ -15,7 +15,7 @@ static const uint64_t chunk_hashes[] = {
 
 static const ModernGekkoModuleDesc descriptor = {
     MODERNGEKKO_MODULE_ABI_VERSION,
-    2u,
+    MODERNGEKKO_CPU_ABI_VERSION,
     (uint32_t)sizeof(CPUState),
     "TEST01",
     0x80003100u,

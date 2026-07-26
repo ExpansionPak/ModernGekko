@@ -34,6 +34,43 @@ bool ValidNetplayAddress(std::string_view value) {
   });
 }
 
+std::string NormalizeGraphicsBackend(std::string value) {
+  const std::string lower = Lower(Trim(std::move(value)));
+  if (lower == "vulkan")
+    return "Vulkan";
+  if (lower == "opengl" || lower == "ogl")
+    return "OGL";
+  return {};
+}
+
+bool ParseBoolean(const std::string &value, bool *result) {
+  if (value == "true" || value == "1" || value == "yes" || value == "on") {
+    *result = true;
+    return true;
+  }
+  if (value == "false" || value == "0" || value == "no" || value == "off") {
+    *result = false;
+    return true;
+  }
+  return false;
+}
+
+fs::path ControllerConfigPath(const fs::path &user_directory) {
+#ifdef MODERNGEKKO_GAMECUBE_CONTROLLERS
+  return user_directory / "Config" / "GCPadNew.ini";
+#else
+  return user_directory / "Config" / "WiimoteNew.ini";
+#endif
+}
+
+std::string_view ControllerSectionPrefix() {
+#ifdef MODERNGEKKO_GAMECUBE_CONTROLLERS
+  return "[GCPad";
+#else
+  return "[Wiimote";
+#endif
+}
+
 } // namespace
 
 const std::vector<ResolutionOption> &SupportedResolutions() {
@@ -44,6 +81,14 @@ const std::vector<ResolutionOption> &SupportedResolutions() {
       {"3840x2160", 6}, {"5120x2880", 8}, {"7680x4320", 12},
   };
   return resolutions;
+}
+
+const std::vector<GraphicsBackendOption> &SupportedGraphicsBackends() {
+  static const std::vector<GraphicsBackendOption> backends = {
+      {"Vulkan", "Vulkan"},
+      {"OpenGL", "OGL"},
+  };
+  return backends;
 }
 
 ConfigResult LoadConfig(const fs::path &user_directory,
@@ -76,6 +121,11 @@ ConfigResult LoadConfig(const fs::path &user_directory,
     const std::string value = Lower(raw_value);
     if (key == "resolution")
       config.resolution = value;
+    else if (key == "backend" || key == "graphics_backend") {
+      config.graphics_backend = NormalizeGraphicsBackend(raw_value);
+      if (config.graphics_backend.empty())
+        return {.error = "graphics backend must be Vulkan or OpenGL"};
+    }
     else if (key == "controller")
       config.controller = raw_value;
     else if (key.starts_with("controller") && key.size() == 11 &&
@@ -85,13 +135,11 @@ ConfigResult LoadConfig(const fs::path &user_directory,
         config.controllers.resize(index + 1);
       config.controllers[index] = raw_value;
     } else if (key == "show_fps_in_title") {
-      if (value == "true" || value == "1" || value == "yes" || value == "on")
-        config.show_fps_in_title = true;
-      else if (value == "false" || value == "0" || value == "no" ||
-               value == "off")
-        config.show_fps_in_title = false;
-      else
+      if (!ParseBoolean(value, &config.show_fps_in_title))
         return {.error = "show_fps_in_title must be true or false"};
+    } else if (key == "fullscreen") {
+      if (!ParseBoolean(value, &config.fullscreen))
+        return {.error = "fullscreen must be true or false"};
     } else if (key == "nickname")
       config.netplay_nickname = raw_value;
     else if (key == "address")
@@ -160,7 +208,10 @@ ConfigResult LoadConfig(const fs::path &user_directory,
 
 bool SaveConfig(const fs::path &user_directory, const ConfigResult &config,
                 std::string *error) {
-  if (config.resolution.empty() || config.netplay_nickname.empty() ||
+  const std::string graphics_backend =
+      NormalizeGraphicsBackend(config.graphics_backend);
+  if (config.resolution.empty() || graphics_backend.empty() ||
+      config.netplay_nickname.empty() ||
       config.netplay_nickname.size() > 30 ||
       config.netplay_nickname.find_first_of("\r\n") != std::string::npos ||
       !ValidNetplayAddress(config.netplay_address) ||
@@ -202,6 +253,8 @@ bool SaveConfig(const fs::path &user_directory, const ConfigResult &config,
           "[Video]\n"
           "resolution="
        << config.resolution << '\n'
+       << "backend=" << graphics_backend << '\n'
+       << "fullscreen=" << (config.fullscreen ? "true" : "false") << '\n'
        << "show_fps_in_title=" << (config.show_fps_in_title ? "true" : "false")
        << '\n'
        << "[Input]\n";
@@ -244,29 +297,33 @@ std::string ReadConfiguredController(const fs::path &user_directory) {
 
 std::vector<std::string>
 ReadConfiguredControllers(const fs::path &user_directory) {
-  std::ifstream input(user_directory / "Config" / "WiimoteNew.ini");
+  std::ifstream input(ControllerConfigPath(user_directory));
   std::vector<std::string> controllers;
   std::string line;
-  std::size_t wiimote = 4;
+  std::size_t controller_index = 4;
+  const std::string_view section_prefix = ControllerSectionPrefix();
   while (std::getline(input, line)) {
     const std::string trimmed = Trim(line);
     if (trimmed.starts_with('[') && trimmed.ends_with(']')) {
-      wiimote = 4;
-      if (trimmed.size() == 10 && trimmed.starts_with("[Wiimote") &&
-          trimmed[8] >= '1' && trimmed[8] <= '4')
-        wiimote = static_cast<std::size_t>(trimmed[8] - '1');
+      controller_index = 4;
+      if (trimmed.size() == section_prefix.size() + 2 &&
+          trimmed.starts_with(section_prefix) &&
+          trimmed[section_prefix.size()] >= '1' &&
+          trimmed[section_prefix.size()] <= '4')
+        controller_index = static_cast<std::size_t>(
+            trimmed[section_prefix.size()] - '1');
       continue;
     }
-    if (wiimote >= 4)
+    if (controller_index >= 4)
       continue;
     const std::size_t separator = trimmed.find('=');
     if (separator != std::string::npos &&
         Trim(trimmed.substr(0, separator)) == "Device") {
       const std::string device = Trim(trimmed.substr(separator + 1));
       if (!device.empty()) {
-        if (controllers.size() <= wiimote)
-          controllers.resize(wiimote + 1);
-        controllers[wiimote] = device;
+        if (controllers.size() <= controller_index)
+          controllers.resize(controller_index + 1);
+        controllers[controller_index] = device;
       }
     }
   }
@@ -276,7 +333,7 @@ ReadConfiguredControllers(const fs::path &user_directory) {
 
 bool ControllerConfigExists(const fs::path &user_directory) {
   std::error_code ec;
-  return fs::is_regular_file(user_directory / "Config" / "WiimoteNew.ini", ec);
+  return fs::is_regular_file(ControllerConfigPath(user_directory), ec);
 }
 
 bool GenerateControllerConfig(const fs::path &user_directory,
@@ -296,7 +353,7 @@ bool GenerateControllerConfig(const fs::path &user_directory,
     }
   }
 
-  const fs::path destination = user_directory / "Config" / "WiimoteNew.ini";
+  const fs::path destination = ControllerConfigPath(user_directory);
   std::error_code ec;
   fs::create_directories(destination.parent_path(), ec);
   if (ec) {
@@ -311,6 +368,37 @@ bool GenerateControllerConfig(const fs::path &user_directory,
     return false;
   }
   for (std::size_t i = 0; i < 4; ++i) {
+#ifdef MODERNGEKKO_GAMECUBE_CONTROLLERS
+    output << "[GCPad" << i + 1 << "]\n";
+    if (i >= controllers.size())
+      continue;
+    output << "Device = " << controllers[i] << '\n'
+           << "Buttons/A = `Button A`\n"
+              "Buttons/B = `Button B`\n"
+              "Buttons/X = `Button X`\n"
+              "Buttons/Y = `Button Y`\n"
+              "Buttons/Z = `Shoulder R`\n"
+              "Buttons/Start = Start\n"
+              "Main Stick/Up = `Left Y+`\n"
+              "Main Stick/Down = `Left Y-`\n"
+              "Main Stick/Left = `Left X-`\n"
+              "Main Stick/Right = `Left X+`\n"
+              "Main Stick/Calibration = 100.00\n"
+              "C-Stick/Up = `Right Y+`\n"
+              "C-Stick/Down = `Right Y-`\n"
+              "C-Stick/Left = `Right X-`\n"
+              "C-Stick/Right = `Right X+`\n"
+              "C-Stick/Calibration = 100.00\n"
+              "Triggers/L = `Trigger L`\n"
+              "Triggers/R = `Trigger R`\n"
+              "Triggers/L-Analog = `Trigger L`\n"
+              "Triggers/R-Analog = `Trigger R`\n"
+              "D-Pad/Up = `Pad N`\n"
+              "D-Pad/Down = `Pad S`\n"
+              "D-Pad/Left = `Pad W`\n"
+              "D-Pad/Right = `Pad E`\n"
+              "Rumble/Motor = `Motor L` | `Motor R`\n";
+#else
     output << "[Wiimote" << i + 1 << "]\n";
     if (i >= controllers.size())
       continue;
@@ -322,10 +410,10 @@ bool GenerateControllerConfig(const fs::path &user_directory,
               "Buttons/- = Back\n"
               "Buttons/+ = Start\n"
               "Buttons/Home = Guide\n"
-              "D-Pad/Up = `Pad N`\n"
-              "D-Pad/Down = `Pad S`\n"
-              "D-Pad/Left = `Pad W`\n"
-              "D-Pad/Right = `Pad E`\n"
+              "D-Pad/Up = `Pad N` | `Left Y+`\n"
+              "D-Pad/Down = `Pad S` | `Left Y-`\n"
+              "D-Pad/Left = `Pad W` | `Left X-`\n"
+              "D-Pad/Right = `Pad E` | `Left X+`\n"
               "IR/Up = `Cursor Y-`\n"
               "IR/Down = `Cursor Y+`\n"
               "IR/Left = `Cursor X-`\n"
@@ -360,15 +448,23 @@ bool GenerateControllerConfig(const fs::path &user_directory,
               "Rumble/Motor = Motor\n"
               "Extension = None\n"
               "Options/Sideways Wiimote = True\n";
+#endif
   }
+#ifndef MODERNGEKKO_GAMECUBE_CONTROLLERS
   output << "[BalanceBoard]\n";
+#endif
   if (!output) {
     if (message)
       *message = "can't write " + destination.string();
     return false;
   }
   if (message)
-    *message = std::to_string(controllers.size()) + " sideways Wii Remote" +
+    *message = std::to_string(controllers.size()) +
+#ifdef MODERNGEKKO_GAMECUBE_CONTROLLERS
+               " GameCube controller" +
+#else
+               " sideways Wii Remote" +
+#endif
                (controllers.size() == 1 ? " mapped" : "s mapped");
   return true;
 }

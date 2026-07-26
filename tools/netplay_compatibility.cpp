@@ -3,10 +3,12 @@
 #include "Common/Crypto/SHA1.h"
 #include "Common/Version.h"
 #include "moderngekko/cpu_state.h"
+#include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
 
 #include <array>
 #include <cstdint>
+#include <fstream>
 #include <memory>
 #include <span>
 #include <string>
@@ -39,6 +41,40 @@ void HashRanges(Common::SHA1::Context &context, const ModernGekkoRange *ranges,
   }
 }
 
+void HashString(Common::SHA1::Context &context, const std::string &value) {
+  HashU64(context, value.size());
+  context.Update(
+      std::span(reinterpret_cast<const u8 *>(value.data()), value.size()));
+}
+
+std::string ModsFingerprint(const RuntimeConfig &config) {
+  std::vector<ModLoadIssue> issues;
+  const std::vector<ModSource> sources =
+      DiscoverModSources(config.mod_directories, &issues);
+  if (!issues.empty())
+    return "rejected";
+  auto context = Common::SHA1::CreateContext();
+  HashU32(*context, MODERNGEKKO_MOD_ABI_VERSION);
+  HashU64(*context, sources.size());
+  std::array<u8, 65536> buffer{};
+  for (const ModSource &source : sources) {
+    if (source.kind != ModSource::Kind::DynamicPath)
+      return "attached";
+    HashString(*context, source.path.filename().string());
+    std::ifstream file(source.path, std::ios::binary);
+    if (!file)
+      return "rejected";
+    while (file) {
+      file.read(reinterpret_cast<char *>(buffer.data()), buffer.size());
+      const std::streamsize count = file.gcount();
+      if (count > 0)
+        context->Update(
+            std::span(buffer.data(), static_cast<std::size_t>(count)));
+    }
+  }
+  return Common::SHA1::DigestToString(context->Finish());
+}
+
 std::string DescriptorFingerprint(const ModernGekkoModuleDesc &descriptor) {
   auto context = Common::SHA1::CreateContext();
   HashU32(*context, descriptor.abi_version);
@@ -53,6 +89,23 @@ std::string DescriptorFingerprint(const ModernGekkoModuleDesc &descriptor) {
   HashRanges(*context, descriptor.chunk_ranges, descriptor.num_chunk_ranges);
   for (std::uint32_t i = 0; i < descriptor.num_chunk_ranges; ++i)
     HashU64(*context, descriptor.chunk_hashes[i]);
+  HashU32(*context, descriptor.num_rel_modules);
+  for (std::uint32_t i = 0; i < descriptor.num_rel_modules; ++i) {
+    const ModernGekkoRelModule &module = descriptor.rel_modules[i];
+    HashU32(*context, module.module_id);
+    HashU32(*context, module.version);
+    HashU32(*context, module.section_count);
+    HashU32(*context, module.section_info_offset);
+    HashU32(*context, module.file_size);
+    HashU32(*context, module.num_sections);
+    for (std::uint32_t j = 0; j < module.num_sections; ++j) {
+      const ModernGekkoRelSection &section = module.sections[j];
+      HashU32(*context, section.module_id);
+      HashU32(*context, section.section_index);
+      HashU32(*context, section.linked_start);
+      HashU32(*context, section.size);
+    }
+  }
   return Common::SHA1::DigestToString(context->Finish());
 }
 
@@ -88,10 +141,12 @@ std::string CompatibilityFingerprint(const RuntimeConfig &config,
       module = "rejected";
     }
   }
-  return "moderngekko-netplay-6|" + Common::GetScmRevGitStr() + "|" +
-         game.disc_id + "|" + game.dol_sha256 + "|" +
+  return "moderngekko-netplay-8|" + Common::GetScmRevGitStr() + "|" +
+         game.disc_id + "|" + game.dol_sha256 + "|" + game.rel_sha256 + "|" +
+         game.assets_sha256 + "|" +
          std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|" +
          std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" +
-         std::to_string(sizeof(CPUState)) + "|" + module;
+         std::to_string(sizeof(CPUState)) + "|" + module + "|" +
+         ModsFingerprint(config);
 }
 } // namespace moderngekko::frontend

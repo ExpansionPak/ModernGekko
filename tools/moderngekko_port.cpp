@@ -26,11 +26,16 @@ namespace
 {
 constexpr std::string_view RECOMPCORE_REVISION = "6ed835397d984f2ac8cccb89589ef592add68d71";
 constexpr std::string_view DOLRECOMP_REVISION =
-    "a2b02e5a515fc8971cc551ad51c9e26a9815daad-dispatch-port";
+    "native-llvm-v4";
 
 struct BuildOptions
 {
   std::string toolchain = "auto";
+#if defined(MODERNGEKKO_DOLRECOMP_LLVM)
+  std::string backend = "llvm";
+#else
+  std::string backend = "c";
+#endif
   fs::path output;
   std::vector<std::string> runner_arguments;
 };
@@ -409,6 +414,13 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
     std::cerr << "compiler is unavailable: " << compiler << '\n';
     return std::nullopt;
   }
+  const fs::path dolrecomp = SiblingExecutable(argv0, "dolrecomp");
+  const auto dolrecomp_hash = moderngekko::HashFileSha256(dolrecomp);
+  if (!dolrecomp_hash)
+  {
+    std::cerr << "DolRecomp compiler is unavailable: " << dolrecomp << '\n';
+    return std::nullopt;
+  }
 #if defined(__x86_64__) || defined(_M_X64)
   constexpr std::string_view architecture = "x86_64";
 #elif defined(__aarch64__) || defined(_M_ARM64)
@@ -437,7 +449,9 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
       std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" + compiler_identity + "|" +
-      std::string(architecture) + "|" + flags + "|patches=" + patches.fingerprint;
+      std::string(architecture) + "|" + flags + "|backend=" + options.backend +
+      "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
+      *dolrecomp_hash;
   std::ostringstream key_tail;
   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
@@ -461,11 +475,13 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
     manifest << "disc_id=" << game.disc_id << '\n' << "dol_sha256=" << game.dol_sha256 << '\n'
              << "recompcore_revision=" << RECOMPCORE_REVISION << '\n'
              << "dolrecomp_revision=" << DOLRECOMP_REVISION << '\n'
+             << "dolrecomp_binary_sha256=" << *dolrecomp_hash << '\n'
              << "module_abi=" << MODERNGEKKO_MODULE_ABI_VERSION << '\n'
              << "cpu_abi=" << MODERNGEKKO_CPU_ABI_VERSION << '\n'
              << "compiler=" << compiler_identity << '\n'
              << "architecture=" << architecture << '\n'
              << "flags=" << flags << '\n'
+             << "backend=" << options.backend << '\n'
              << "patches=" << patches.fingerprint << '\n';
     fs::create_directories(options.output / game.disc_id);
     std::ofstream active(options.output / game.disc_id / "active-module.txt");
@@ -490,9 +506,9 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
     std::cout << "applied " << patches.entries.size() << " default DOL patches\n";
   }
   const fs::path generated_parent = artifact / "dolrecomp-output";
-  const fs::path dolrecomp = SiblingExecutable(argv0, "dolrecomp");
   std::string generate = Quote(dolrecomp) + " -j" +
-                         std::to_string(std::max(1u, std::thread::hardware_concurrency())) + " ";
+                         std::to_string(std::max(1u, std::thread::hardware_concurrency())) +
+                         " --backend=" + options.backend + " ";
   if (game.platform == moderngekko::GamePlatform::GameCube)
     generate += "--cpu gekko --gamecube " + Quote(recomp_dol) + " " + Quote(generated_parent);
   else
@@ -557,7 +573,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
 void Usage()
 {
   std::cerr << "usage: moderngekko-port inspect <game-root>\n"
-               "       moderngekko-port build <game-root> [--toolchain auto|clang|gcc|msvc] [--output path]\n"
+               "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--output path]\n"
                "       moderngekko-port run <game-root> [build options] [-- runner options]\n";
 }
 }  // namespace
@@ -582,6 +598,8 @@ int main(int argc, char** argv)
       runner_args = true;
     else if (arg == "--toolchain" && i + 1 < argc)
       options.toolchain = argv[++i];
+    else if (arg == "--backend" && i + 1 < argc)
+      options.backend = argv[++i];
     else if (arg == "--output" && i + 1 < argc)
       options.output = argv[++i];
     else if (command == "run")
@@ -594,6 +612,18 @@ int main(int argc, char** argv)
   }
   if (options.output.empty())
     options.output = DefaultOutput();
+  if (options.backend != "c" && options.backend != "llvm")
+  {
+    std::cerr << "unknown backend: " << options.backend << '\n';
+    return 2;
+  }
+#if !defined(MODERNGEKKO_DOLRECOMP_LLVM)
+  if (options.backend == "llvm")
+  {
+    std::cerr << "LLVM backend is unavailable in this build\n";
+    return 2;
+  }
+#endif
   if (command == "inspect")
     return Inspect(root, options.output);
   if (command != "build" && command != "run")

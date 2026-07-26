@@ -173,6 +173,19 @@ int main() {
   const auto directory =
       std::filesystem::temp_directory_path() / "moderngekko-netplay-test";
   std::filesystem::remove_all(directory);
+  const auto mods_directory = directory / "Mods";
+  std::filesystem::create_directories(mods_directory);
+  std::filesystem::copy_file(
+      MODERNGEKKO_NETPLAY_TEST_MOD_PATH,
+      mods_directory / std::filesystem::path(MODERNGEKKO_NETPLAY_TEST_MOD_PATH).filename());
+  moderngekko::RuntimeConfig modded_config = first_config;
+  modded_config.mod_directories.push_back(mods_directory);
+  const std::string modded_fingerprint =
+      moderngekko::frontend::CompatibilityFingerprint(modded_config, metadata);
+  if (modded_fingerprint == first_fingerprint ||
+      modded_fingerprint !=
+          moderngekko::frontend::CompatibilityFingerprint(modded_config, metadata))
+    return 13;
   UICommon::SetUserDirectory(directory.string());
   UICommon::Init();
 

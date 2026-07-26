@@ -21,13 +21,16 @@
 #include "VideoCommon/VideoConfig.h"
 #include "dolphin_runtime_internal.hpp"
 #include "moderngekko/cpu_state.h"
+#include "moderngekko/mod_loader.hpp"
 #include "moderngekko/module_loader.hpp"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstddef>
+#include <cstdio>
 #include <fmt/format.h>
 #include <mutex>
 #include <thread>
@@ -134,6 +137,7 @@ struct Runtime::Impl {
   GameMetadata metadata;
   std::string title;
   std::unique_ptr<Platform> platform;
+  std::unique_ptr<ModManager> mods;
   Common::EventHook state_hook;
   bool ui_initialized = false;
   bool controllers_initialized = false;
@@ -221,12 +225,22 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->title = impl->config.window_title.value_or(
       "ModernGekko - " + impl->metadata.game_name + " [" +
       impl->metadata.disc_id + "]");
+  impl->mods = std::make_unique<ModManager>();
+  const ModLoadReport mod_report = impl->mods->LoadDirectories(
+      impl->config.mod_directories, impl->metadata.disc_id);
+  for (const ModLoadIssue &issue : mod_report.issues)
+    std::fprintf(stderr, "mod rejected: %s: %s\n", issue.source.c_str(),
+                 issue.message.c_str());
+  for (const LoadedModInfo &mod : mod_report.loaded)
+    std::fprintf(stderr, "mod loaded: %s %s\n", mod.id.c_str(),
+                 mod.version.c_str());
 
   if (!s_external_ui_common) {
     UICommon::SetUserDirectory(impl->config.user_directory.string());
     UICommon::Init();
     impl->ui_initialized = true;
   }
+  Config::SetBase(Config::MAIN_FULLSCREEN, impl->config.fullscreen);
 
   if (impl->config.headless)
     impl->platform = Platform::CreateHeadlessPlatform();
@@ -277,30 +291,36 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   } else if (impl->config.audio.backend.empty() ||
              !std::ranges::contains(audio_backends,
                                     impl->config.audio.backend)) {
-    impl->config.audio.backend = AudioCommon::GetDefaultSoundBackend();
-    if (impl->config.audio.backend == BACKEND_NULLSOUND) {
-      const auto available =
-          std::ranges::find_if(audio_backends, [](const std::string &backend) {
-            return backend != BACKEND_NULLSOUND;
-          });
-      if (available != audio_backends.end())
-        impl->config.audio.backend = *available;
-    }
+    constexpr std::array preferred_backends = {
+        BACKEND_CUBEB, BACKEND_PULSEAUDIO, BACKEND_ALSA};
+    const auto preferred =
+        std::ranges::find_if(preferred_backends, [&](const char *backend) {
+          return std::ranges::contains(audio_backends, backend);
+        });
+    impl->config.audio.backend =
+        preferred != preferred_backends.end() ? *preferred : BACKEND_NULLSOUND;
   }
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, impl->config.audio.backend);
   Config::SetBase(Config::MAIN_INPUT_BACKGROUND_INPUT,
                   impl->config.input.background_input);
 
   auto &jit = Core::System::GetInstance().GetJitInterface();
+  StaticRecompModuleSource recomp_source;
   if (impl->config.module.kind == ModuleSource::Kind::DynamicPath)
-    jit.SetStaticRecompModuleSource(
-        StaticRecompModuleSource::Dynamic(impl->config.module.path.string()));
+    recomp_source =
+        StaticRecompModuleSource::Dynamic(impl->config.module.path.string());
   else if (impl->config.module.kind == ModuleSource::Kind::AttachedDescriptor)
-    jit.SetStaticRecompModuleSource(StaticRecompModuleSource::Attached(
+    recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(
-            impl->config.module.descriptor)));
-  else
-    jit.SetStaticRecompModuleSource({});
+            impl->config.module.descriptor));
+  if (!impl->mods->Empty()) {
+    recomp_source.host_call = &ModManager::HostCall;
+    recomp_source.host_call_contains = &ModManager::HostCallContains;
+    recomp_source.host_call_range_contains =
+        &ModManager::HostCallRangeContains;
+    recomp_source.host_call_user = impl->mods.get();
+  }
+  jit.SetStaticRecompModuleSource(std::move(recomp_source));
 
   s_runtime_active = true;
   s_platform = impl->platform.get();

@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MODERNGEKKO_CPU_ABI_VERSION 2u
+#define MODERNGEKKO_CPU_ABI_VERSION 3u
 #define GXRUNTIME_CPU_ABI_VERSION MODERNGEKKO_CPU_ABI_VERSION
 
 typedef struct CPUState CPUState;
@@ -21,6 +21,10 @@ typedef void (*PPCExternalWrite32)(CPUState* cpu, uint32_t address, uint32_t val
 typedef void* (*PPCExternalPointer)(CPUState* cpu, uint32_t address, uint32_t size);
 typedef void (*PPCInstructionFallback)(CPUState* cpu, uint32_t instruction, uint32_t address);
 typedef bool (*PPCHostCall)(CPUState* cpu, uint32_t address);
+typedef uint32_t (*PPCSPRRead)(CPUState* cpu, uint16_t spr, uint32_t address);
+typedef void (*PPCSPRWrite)(CPUState* cpu, uint16_t spr, uint32_t value, uint32_t address);
+typedef void (*PPCCacheControl)(CPUState* cpu, uint8_t operation, uint32_t address,
+                                uint32_t instruction_address);
 
 struct CPUState
 {
@@ -70,6 +74,9 @@ struct CPUState
     int64_t downcount;
     uint8_t* exram;
     uint32_t exram_size;
+    PPCSPRRead spr_read;
+    PPCSPRWrite spr_write;
+    PPCCacheControl cache_control;
 };
 
 #ifdef __cplusplus

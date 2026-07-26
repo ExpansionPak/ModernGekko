@@ -7,6 +7,7 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <vector>
 
 namespace moderngekko
 {
@@ -55,11 +56,13 @@ struct RuntimeConfig
   std::filesystem::path game_root;
   std::filesystem::path user_directory;
   ModuleSource module;
+  std::vector<std::filesystem::path> mod_directories;
   GraphicsSettings graphics;
   AudioSettings audio;
   InputSettings input;
   WindowSystem window_system = WindowSystem::Default;
   bool headless = false;
+  bool fullscreen = false;
   bool allow_interpreter = false;
   bool show_fps_in_title = true;
   std::optional<std::string> window_title;

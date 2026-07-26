@@ -13,12 +13,19 @@ struct ResolutionOption {
   int dolphin_scale;
 };
 
+struct GraphicsBackendOption {
+  const char *text;
+  const char *value;
+};
+
 struct ConfigResult {
   int dolphin_scale = 0;
   std::string resolution;
+  std::string graphics_backend = "Vulkan";
   std::string controller;
   std::vector<std::string> controllers;
   bool show_fps_in_title = true;
+  bool fullscreen = false;
   std::string netplay_nickname = "Player";
   std::string netplay_address = "127.0.0.1";
   std::uint16_t netplay_port = 2626;
@@ -29,6 +36,7 @@ struct ConfigResult {
 };
 
 const std::vector<ResolutionOption> &SupportedResolutions();
+const std::vector<GraphicsBackendOption> &SupportedGraphicsBackends();
 ConfigResult LoadConfig(const std::filesystem::path &user_directory,
                         bool create_if_missing);
 bool SaveConfig(const std::filesystem::path &user_directory,
