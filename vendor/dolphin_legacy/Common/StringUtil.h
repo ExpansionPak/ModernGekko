@@ -256,12 +256,12 @@ inline std::wstring UTF8ToTStr(std::string_view str)
 #else
 inline std::string TStrToUTF8(std::string_view str)
 {
-  return str;
+  return std::string{str};
 }
 
 inline std::string UTF8ToTStr(std::string_view str)
 {
-  return str;
+  return std::string{str};
 }
 #endif
 
