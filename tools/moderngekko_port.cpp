@@ -20,6 +20,10 @@
 #include <unordered_set>
 #include <vector>
 
+#if defined(_WIN32)
+#include <windows.h>
+#endif
+
 namespace fs = std::filesystem;
 
 namespace
@@ -290,7 +294,27 @@ std::string ReadCommand(const std::string& command)
 bool RunCommand(const std::string& command)
 {
   std::cout << "+ " << command << '\n';
+#if defined(_WIN32)
+  std::vector<char> command_line(command.begin(), command.end());
+  command_line.push_back('\0');
+  STARTUPINFOA startup{};
+  startup.cb = sizeof(startup);
+  PROCESS_INFORMATION process{};
+  if (!CreateProcessA(nullptr, command_line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr,
+                      &startup, &process))
+  {
+    std::cerr << "failed to launch command: Windows error " << GetLastError() << '\n';
+    return false;
+  }
+  WaitForSingleObject(process.hProcess, INFINITE);
+  DWORD exit_code = 1;
+  const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
+  CloseHandle(process.hThread);
+  CloseHandle(process.hProcess);
+  return got_exit_code && exit_code == 0;
+#else
   return std::system(command.c_str()) == 0;
+#endif
 }
 
 fs::path SiblingExecutable(const char* argv0, std::string name)
@@ -640,5 +664,5 @@ int main(int argc, char** argv)
                     Quote(root) + " --module " + Quote(*module);
   for (const std::string& arg : options.runner_arguments)
     run += " " + Quote(arg);
-  return std::system(run.c_str()) == 0 ? 0 : 1;
+  return RunCommand(run) ? 0 : 1;
 }
