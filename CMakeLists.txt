@@ -519,7 +519,8 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     # static linker.
     if(MINGW)
         target_link_libraries(moderngekko-launcher PRIVATE
-            ModernGekko::Runtime discio imgui ${_moderngekko_sdl_target})
+            "-Wl,--whole-archive" moderngekko "-Wl,--no-whole-archive"
+            discio core uicommon imgui ${_moderngekko_sdl_target})
     elseif(CMAKE_VERSION VERSION_GREATER_EQUAL 3.24)
         target_link_libraries(moderngekko-launcher PRIVATE
             "$<LINK_LIBRARY:WHOLE_ARCHIVE,moderngekko>"
