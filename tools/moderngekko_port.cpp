@@ -35,6 +35,10 @@ constexpr std::string_view DOLRECOMP_REVISION =
 struct BuildOptions
 {
   std::string toolchain = "auto";
+  // Empty means "leave the module template's own default alone". Any other
+  // value is forwarded as RECOMPCORE_MODULE_OPT_LEVEL and folded into the
+  // cache key, so an -O3 module cannot collide with an -O2 one.
+  std::string opt_level;
 #if defined(MODERNGEKKO_DOLRECOMP_LLVM)
   std::string backend = "llvm";
 #else
@@ -456,10 +460,15 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
 #else
   constexpr std::string_view architecture = "unsupported";
 #endif
+  // The module template appends -O<level> after CMake's own
+  // CMAKE_C_FLAGS_RELEASE, so this is the level that actually reaches the
+  // per-translation-unit compiles.
+  const std::string opt = options.opt_level.empty() ? std::string("2") : options.opt_level;
   std::string flags;
   if (compiler == "clang")
   {
-    flags = "compile:-O2 -flto=thin -fvisibility=hidden -ffp-contract=off -fno-fast-math "
+    flags = "compile:-O" + opt +
+            " -flto=thin -fvisibility=hidden -ffp-contract=off -fno-fast-math "
             "link:-flto=thin";
 #if defined(__linux__)
     flags += " -fuse-ld=lld";
@@ -467,7 +476,8 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   }
   else if (compiler == "gcc")
   {
-    flags = "compile:-O2 -fvisibility=hidden -ffp-contract=off -fno-fast-math link:no-lto";
+    flags = "compile:-O" + opt +
+            " -fvisibility=hidden -ffp-contract=off -fno-fast-math link:no-lto";
   }
   else
   {
@@ -583,6 +593,9 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       " -DCMAKE_C_COMPILER=" + compiler + " -DGAME_ID=" + game.disc_id +
       " -DGENERATED_DIR=" + Quote(generated) +
       " -DGXRUNTIME_DIR=" + Quote(source_root / "vendor/dolphin/GXRuntime") +
+      (options.opt_level.empty()
+           ? std::string()
+           : " -DRECOMPCORE_MODULE_OPT_LEVEL=" + options.opt_level) +
       " -DCHASSIS_ABI_DIR=" +
       Quote(source_root / "vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp");
   if (!RunCommand(configure) ||
@@ -601,7 +614,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
 void Usage()
 {
   std::cerr << "usage: moderngekko-port inspect <game-root>\n"
-               "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--output path]\n"
+               "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--opt-level 0-3] [--output path]\n"
                "       moderngekko-port run <game-root> [build options] [-- runner options]\n";
 }
 }  // namespace
@@ -628,6 +641,8 @@ int main(int argc, char** argv)
       options.toolchain = argv[++i];
     else if (arg == "--backend" && i + 1 < argc)
       options.backend = argv[++i];
+    else if (arg == "--opt-level" && i + 1 < argc)
+      options.opt_level = argv[++i];
     else if (arg == "--output" && i + 1 < argc)
       options.output = argv[++i];
     else if (command == "run")
@@ -643,6 +658,12 @@ int main(int argc, char** argv)
   if (options.backend != "c" && options.backend != "llvm")
   {
     std::cerr << "unknown backend: " << options.backend << '\n';
+    return 2;
+  }
+  if (!options.opt_level.empty() &&
+      (options.opt_level.size() != 1 || options.opt_level[0] < '0' || options.opt_level[0] > '3'))
+  {
+    std::cerr << "opt level must be 0, 1, 2, or 3: " << options.opt_level << '\n';
     return 2;
   }
 #if !defined(MODERNGEKKO_DOLRECOMP_LLVM)
