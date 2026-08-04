@@ -16,6 +16,15 @@
 #include <thread>
 #include <vector>
 
+#if defined(_WIN32)
+// For the affinity/priority setup in main(). WIN32_LEAN_AND_MEAN keeps the
+// winsock and GDI surface out of a translation unit that only needs the
+// processor-topology and process calls.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
+
 namespace {
 #ifndef MODERNGEKKO_RUNNER_NAME
 #define MODERNGEKKO_RUNNER_NAME "moderngekko-run"
@@ -386,8 +395,69 @@ int RunMain(int argc, char **argv) {
   return 0;
 }
 
+#if defined(_WIN32)
+// Confine the process to the cores that share the largest L3, and raise its
+// priority.
+//
+// The emulated CPU is a single serial instruction stream, so nothing here is
+// about parallelism -- core usage stays at 1.00 either way. It is about cache
+// residency. A recompiled module is one dispatch switch spanning the whole
+// game, which lives or dies on staying in L3, and on a chip with 3D V-Cache on
+// one CCD only, Windows migrating the thread between dies makes it repeatedly
+// lose its working set. Measured on a 9950X3D: 55.41 -> 70.42 fps, +27%.
+//
+// Selecting by "largest L3" rather than a hardcoded mask keeps this correct
+// elsewhere: where every core shares one L3 the mask covers all of them and
+// this is a no-op. Set MODERNGEKKO_NO_AFFINITY=1 to skip it entirely.
+void PinToLargestCache() {
+  if (const char *disabled = std::getenv("MODERNGEKKO_NO_AFFINITY");
+      disabled && disabled[0] && disabled[0] != '0')
+    return;
+
+  DWORD length = 0;
+  GetLogicalProcessorInformationEx(RelationCache, nullptr, &length);
+  if (length == 0)
+    return;
+  std::vector<char> buffer(length);
+  if (!GetLogicalProcessorInformationEx(
+          RelationCache,
+          reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &length))
+    return;
+
+  KAFFINITY best_mask = 0;
+  DWORD best_size = 0;
+  for (DWORD offset = 0; offset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= length;) {
+    auto *entry =
+        reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
+    if (entry->Size == 0)
+      break;
+    if (entry->Relationship == RelationCache && entry->Cache.Level == 3 &&
+        entry->Cache.CacheSize > best_size) {
+      // Multi-group machines would need every group considered; a single group
+      // covers up to 64 logical processors, which is all this targets.
+      best_size = entry->Cache.CacheSize;
+      best_mask = entry->Cache.GroupMask.Mask;
+    }
+    offset += entry->Size;
+  }
+  if (best_mask == 0)
+    return;
+
+  const HANDLE process = GetCurrentProcess();
+  if (SetProcessAffinityMask(process, best_mask)) {
+    std::cout << "[perf] pinned to the cores sharing the largest L3 (" << (best_size >> 20)
+              << " MB), mask 0x" << std::hex << static_cast<unsigned long long>(best_mask)
+              << std::dec << '\n';
+  }
+  SetPriorityClass(process, HIGH_PRIORITY_CLASS);
+}
+#endif
+
 int main(int argc, char **argv) {
   try {
+#if defined(_WIN32)
+    PinToLargestCache();
+#endif
     return RunMain(argc, argv);
   } catch (const std::exception &error) {
     std::cerr << "fatal error: " << error.what() << '\n';
