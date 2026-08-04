@@ -1,5 +1,6 @@
 #include "frontend_config.hpp"
 #include "dol_patch.hpp"
+#include "launcher_savestates.hpp"
 #include "moderngekko/game.hpp"
 #include "netplay_session.hpp"
 
@@ -617,6 +618,16 @@ int main(int argc, char** argv)
       graphics_backend_index = static_cast<int>(i);
   }
 
+  // Listed once at startup rather than every frame, so the dropdown does not
+  // hit the filesystem on each redraw. A state written while the launcher is
+  // open therefore appears on the next launch, which is the case that matters:
+  // states are written by the running game, not by the launcher.
+  const std::vector<fs::path> launcher_savestates =
+      moderngekko::frontend::ListLauncherSavestates(user_directory / "states");
+  // Newest first, so index 0 is the most recent. Default to it when one exists:
+  // resuming is the common case, and "Normal boot" stays one click away.
+  int selected_savestate = launcher_savestates.empty() ? -1 : 0;
+
   DialogState dialog;
   std::vector<ControllerOption> controllers = EnumerateControllers();
   bool controller_profile_exists = moderngekko::frontend::ControllerConfigExists(user_directory);
@@ -772,6 +783,40 @@ int main(int argc, char** argv)
     {
       ImGui::Text("Ready: %s [%s]", current_metadata.metadata->game_name.c_str(),
                   current_metadata.metadata->disc_id.c_str());
+      if (!launcher_savestates.empty())
+      {
+        ImGui::TextUnformatted("Start from savestate");
+        const std::string savestate_preview =
+            selected_savestate >= 0 ?
+                moderngekko::frontend::LauncherSavestateLabel(
+                    launcher_savestates[static_cast<std::size_t>(selected_savestate)],
+                    selected_savestate == 0) :
+                "Normal boot";
+        if (ImGui::BeginCombo("##launch_savestate", savestate_preview.c_str()))
+        {
+          const bool normal_boot_selected = selected_savestate < 0;
+          if (ImGui::Selectable("Normal boot", normal_boot_selected))
+            selected_savestate = -1;
+          if (normal_boot_selected)
+            ImGui::SetItemDefaultFocus();
+
+          for (std::size_t i = 0; i < launcher_savestates.size(); ++i)
+          {
+            const std::string label =
+                moderngekko::frontend::LauncherSavestateLabel(launcher_savestates[i], i == 0);
+            const bool selected = selected_savestate == static_cast<int>(i);
+            if (ImGui::Selectable(label.c_str(), selected))
+              selected_savestate = static_cast<int>(i);
+            if (selected)
+              ImGui::SetItemDefaultFocus();
+          }
+          ImGui::EndCombo();
+        }
+        // Netplay starts every player from the same boot, so a state chosen by
+        // one side would desync the session immediately.
+        ImGui::TextDisabled("Solo play only.");
+        ImGui::Spacing();
+      }
       if (ImGui::Button("Play", ImVec2(180 * scale, 42 * scale)))
       {
         if (ensure_controller())
@@ -1070,6 +1115,14 @@ int main(int argc, char** argv)
       std::vector<std::string> argument_storage = {SiblingRunner(argv[0]).string(), "--game",
                                                    current_game.string(), "--user-dir",
                                                    user_directory.string()};
+      // Solo only: see the note by the dropdown.
+      if (launch_mode == LaunchMode::Solo && selected_savestate >= 0 &&
+          static_cast<std::size_t>(selected_savestate) < launcher_savestates.size())
+      {
+        argument_storage.emplace_back("--load-state");
+        argument_storage.emplace_back(
+            launcher_savestates[static_cast<std::size_t>(selected_savestate)].string());
+      }
       if (launch_mode == LaunchMode::Host)
         argument_storage.emplace_back("--netplay-host");
       else if (launch_mode == LaunchMode::Join)
