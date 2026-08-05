@@ -618,12 +618,15 @@ int main(int argc, char** argv)
       graphics_backend_index = static_cast<int>(i);
   }
 
+  // StateSaves is Dolphin's own state directory, so states written in-game land
+  // here without any extra configuration and show up on the next launch.
+  //
   // Listed once at startup rather than every frame, so the dropdown does not
   // hit the filesystem on each redraw. A state written while the launcher is
   // open therefore appears on the next launch, which is the case that matters:
   // states are written by the running game, not by the launcher.
   const std::vector<fs::path> launcher_savestates =
-      moderngekko::frontend::ListLauncherSavestates(user_directory / "states");
+      moderngekko::frontend::ListLauncherSavestates(user_directory / "StateSaves");
   // Newest first, so index 0 is the most recent. Default to it when one exists:
   // resuming is the common case, and "Normal boot" stays one click away.
   int selected_savestate = launcher_savestates.empty() ? -1 : 0;

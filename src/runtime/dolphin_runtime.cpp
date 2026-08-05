@@ -359,6 +359,13 @@ RuntimeRunResult Runtime::Run() {
     if (s_boot_session_data)
       boot = BootParameters::GenerateFromFile(
           m_impl->metadata.main_dol.string(), std::move(*s_boot_session_data));
+    else if (m_impl->config.load_state_path)
+      // DeleteSavestateAfterBoot::No: the state is the player's, not a
+      // scratch file this run owns.
+      boot = BootParameters::GenerateFromFile(
+          m_impl->metadata.main_dol.string(),
+          BootSessionData(m_impl->config.load_state_path->string(),
+                          DeleteSavestateAfterBoot::No));
     else
       boot =
           BootParameters::GenerateFromFile(m_impl->metadata.main_dol.string());
