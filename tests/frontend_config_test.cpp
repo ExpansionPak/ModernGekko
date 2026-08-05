@@ -78,9 +78,15 @@ int main() {
       netplay_config.controllers)
     return 10;
 
-  std::ifstream input(directory / "Config" / CONTROLLER_CONFIG_NAME);
-  const std::string generated{std::istreambuf_iterator<char>(input),
-                              std::istreambuf_iterator<char>()};
+  // Scoped so the handle is closed before the cleanup below. Windows refuses
+  // to delete a file that is still open, where POSIX allows it, so leaving
+  // these open makes remove_all throw there and only there.
+  std::string generated;
+  {
+    std::ifstream input(directory / "Config" / CONTROLLER_CONFIG_NAME);
+    generated.assign(std::istreambuf_iterator<char>(input),
+                     std::istreambuf_iterator<char>());
+  }
 #ifdef MODERNGEKKO_GAMECUBE_CONTROLLERS
   if (!generated.contains("Buttons/A = `Button A`\n") ||
       !generated.contains("Buttons/Z = `Shoulder R`\n") ||
@@ -122,9 +128,12 @@ int main() {
   if (!moderngekko::frontend::EnsureControllerConfig(
           directory, netplay_config.controllers, &error))
     return 11;
-  std::ifstream custom_input(directory / "Config" / CONTROLLER_CONFIG_NAME);
-  const std::string preserved{std::istreambuf_iterator<char>(custom_input),
-                              std::istreambuf_iterator<char>()};
+  std::string preserved;
+  {
+    std::ifstream custom_input(directory / "Config" / CONTROLLER_CONFIG_NAME);
+    preserved.assign(std::istreambuf_iterator<char>(custom_input),
+                     std::istreambuf_iterator<char>());
+  }
   if (preserved != custom || moderngekko::frontend::ReadConfiguredController(
                                  directory) != "SDL/9/Custom Controller")
     return 12;
