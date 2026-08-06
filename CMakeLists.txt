@@ -650,7 +650,10 @@ if(BUILD_TESTING)
     add_executable(moderngekko_launcher_savestates_test
         tests/launcher_savestates_test.cpp)
     target_include_directories(moderngekko_launcher_savestates_test PRIVATE
-        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools"
+        # For Core/SavestateLayout.h, which owns the listing rules. It depends on
+        # nothing but the standard library, so this pulls in no Dolphin linkage.
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core")
     target_compile_features(moderngekko_launcher_savestates_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.launcher_savestates
              COMMAND moderngekko_launcher_savestates_test)
@@ -700,6 +703,21 @@ if(BUILD_TESTING)
         else()
             target_link_libraries(moderngekko_netplay_protocol_test PRIVATE
                 ModernGekko::Runtime core uicommon)
+        endif()
+        if(WIN32)
+            # The same treatment the non-test Windows targets get from the loop
+            # above, which runs before the test targets exist and so misses
+            # them. WIN32_LEAN_AND_MEAN keeps windows.h from pulling in
+            # winsock.h, which would clash with the winsock2.h this reaches
+            # through Dolphin's networking headers ('sockaddr' redefinition).
+            target_compile_definitions(moderngekko_netplay_protocol_test PRIVATE
+                WIN32_LEAN_AND_MEAN NOMINMAX)
+            if(MSVC)
+                # Dolphin's headers use __VA_OPT__, which the traditional
+                # preprocessor cannot parse.
+                target_compile_options(moderngekko_netplay_protocol_test PRIVATE
+                    /Zc:preprocessor)
+            endif()
         endif()
         add_test(NAME moderngekko.netplay_protocol COMMAND moderngekko_netplay_protocol_test)
     endif()
