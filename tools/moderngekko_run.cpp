@@ -411,8 +411,7 @@ int RunMain(int argc, char **argv) {
 // elsewhere: where every core shares one L3 the mask covers all of them and
 // this is a no-op. Set MODERNGEKKO_NO_AFFINITY=1 to skip it entirely.
 void PinToLargestCache() {
-  if (const char *disabled = std::getenv("MODERNGEKKO_NO_AFFINITY");
-      disabled && disabled[0] && disabled[0] != '0')
+  if (moderngekko::frontend::AffinityDisabled(std::getenv("MODERNGEKKO_NO_AFFINITY")))
     return;
 
   DWORD length = 0;
@@ -430,13 +429,11 @@ void PinToLargestCache() {
   if (!domain)
     return;
 
-  const HANDLE process = GetCurrentProcess();
-  if (SetProcessAffinityMask(process, domain.mask)) {
+  if (moderngekko::frontend::ApplyCacheDomain(GetCurrentProcess(), domain).affinity_set) {
     std::cout << "[perf] pinned to the cores sharing the largest L3 (" << (domain.size >> 20)
               << " MB), mask 0x" << std::hex << static_cast<unsigned long long>(domain.mask)
               << std::dec << '\n';
   }
-  SetPriorityClass(process, HIGH_PRIORITY_CLASS);
 }
 #endif
 
