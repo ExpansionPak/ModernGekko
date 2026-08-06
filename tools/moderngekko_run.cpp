@@ -1,3 +1,4 @@
+#include "cache_affinity.hpp"
 #include "frontend_config.hpp"
 #include "dol_patch.hpp"
 #include "moderngekko/game.hpp"
@@ -424,29 +425,15 @@ void PinToLargestCache() {
           reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &length))
     return;
 
-  KAFFINITY best_mask = 0;
-  DWORD best_size = 0;
-  for (DWORD offset = 0; offset + sizeof(SYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX) <= length;) {
-    auto *entry =
-        reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data() + offset);
-    if (entry->Size == 0)
-      break;
-    if (entry->Relationship == RelationCache && entry->Cache.Level == 3 &&
-        entry->Cache.CacheSize > best_size) {
-      // Multi-group machines would need every group considered; a single group
-      // covers up to 64 logical processors, which is all this targets.
-      best_size = entry->Cache.CacheSize;
-      best_mask = entry->Cache.GroupMask.Mask;
-    }
-    offset += entry->Size;
-  }
-  if (best_mask == 0)
+  const moderngekko::frontend::CacheDomain domain =
+      moderngekko::frontend::LargestSharedCache(buffer.data(), length);
+  if (!domain)
     return;
 
   const HANDLE process = GetCurrentProcess();
-  if (SetProcessAffinityMask(process, best_mask)) {
-    std::cout << "[perf] pinned to the cores sharing the largest L3 (" << (best_size >> 20)
-              << " MB), mask 0x" << std::hex << static_cast<unsigned long long>(best_mask)
+  if (SetProcessAffinityMask(process, domain.mask)) {
+    std::cout << "[perf] pinned to the cores sharing the largest L3 (" << (domain.size >> 20)
+              << " MB), mask 0x" << std::hex << static_cast<unsigned long long>(domain.mask)
               << std::dec << '\n';
   }
   SetPriorityClass(process, HIGH_PRIORITY_CLASS);
