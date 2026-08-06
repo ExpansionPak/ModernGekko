@@ -18,7 +18,12 @@ void Touch(const fs::path& path, char contents, std::chrono::hours age)
 
 int main()
 {
-  const fs::path root = fs::temp_directory_path() / "moderngekko-launcher-savestate-test";
+  // Timestamped, as the other tests here are: a fixed name collides when two
+  // runs overlap, and inherits whatever a previously crashed run left behind.
+  const fs::path root =
+      fs::temp_directory_path() /
+      ("moderngekko-launcher-savestates-" +
+       std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));
   std::error_code ec;
   fs::remove_all(root, ec);
   fs::create_directories(root, ec);
