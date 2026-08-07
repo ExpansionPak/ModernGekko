@@ -34,7 +34,7 @@ void Usage() {
                " [--game <extracted-root>] [--module <path>]\n"
                "       [--user-dir <path>] [--title <text>]\n"
                "       [--graphics <backend>] [--audio <backend>]\n"
-               "       [--mods <directory>] [--no-mods]\n"
+               "       [--mods <directory>] [--no-mods] [--no-dol-patch]\n"
                "       [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
                "       [--netplay-host | --netplay-join <host>] "
                "[--netplay-port <port>]\n"
@@ -130,6 +130,9 @@ int RunMain(int argc, char **argv) {
 #endif
   std::filesystem::path module_path;
   bool use_default_mods = true;
+  // Patching rewrites the caller's game tree in place, so it needs a way to
+  // be refused.
+  bool apply_dol_patches = true;
   std::optional<moderngekko::frontend::NetplayRole> netplay_role;
   std::string netplay_address;
   std::optional<std::uint16_t> netplay_port;
@@ -161,6 +164,8 @@ int RunMain(int argc, char **argv) {
       config.mod_directories.emplace_back(value("--mods"));
     else if (arg == "--no-mods")
       use_default_mods = false;
+    else if (arg == "--no-dol-patch")
+      apply_dol_patches = false;
     else if (arg == "-X11" || arg == "--x11")
       config.window_system = moderngekko::WindowSystem::X11;
     else if (arg == "--wayland")
@@ -239,17 +244,30 @@ int RunMain(int argc, char **argv) {
   }
 
 #ifdef MODERNGEKKO_DOL_PATCH_MANIFEST
-  bool dol_changed = false;
-  std::string dol_patch_error;
-  if (!moderngekko::frontend::ApplyDolPatchManifest(
-          config.game_root / "sys" / "main.dol",
-          executable_directory / MODERNGEKKO_DOL_PATCH_MANIFEST, &dol_changed,
-          &dol_patch_error)) {
-    std::cerr << "DOL patching failed: " << dol_patch_error << '\n';
-    return 2;
+  const std::filesystem::path dol_path = config.game_root / "sys" / "main.dol";
+  const std::filesystem::path dol_manifest =
+      executable_directory / MODERNGEKKO_DOL_PATCH_MANIFEST;
+  if (apply_dol_patches) {
+    bool dol_changed = false;
+    std::string dol_patch_error;
+    if (!moderngekko::frontend::ApplyDolPatchManifest(
+            dol_path, dol_manifest, &dol_changed, &dol_patch_error)) {
+      std::cerr << "DOL patching failed: " << dol_patch_error << '\n';
+      return 2;
+    }
+    // Name the file that was rewritten and the manifest responsible. This
+    // modifies the game tree the caller supplied, and reporting only that
+    // something happened makes that easy to miss.
+    if (dol_changed) {
+      std::cout << "modified " << dol_path.string() << " from "
+                << dol_manifest.string()
+                << " (pass --no-dol-patch to leave the game unchanged)"
+                << '\n';
+    }
+  } else {
+    std::cout << "skipping DOL patches from " << dol_manifest.string()
+              << '\n';
   }
-  if (dol_changed)
-    std::cout << "Applied native DOL patches\n";
 #endif
   const auto inspected = moderngekko::InspectGame(config.game_root);
   if (!inspected) {
