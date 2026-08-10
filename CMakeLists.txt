@@ -657,6 +657,18 @@ if(BUILD_TESTING)
     target_compile_features(moderngekko_frontend_config_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.frontend_config COMMAND moderngekko_frontend_config_test)
 
+    # Header-only, so the test needs no companion translation unit.
+    add_executable(moderngekko_launcher_savestates_test
+        tests/launcher_savestates_test.cpp)
+    target_include_directories(moderngekko_launcher_savestates_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools"
+        # For Core/SavestateLayout.h, which owns the listing rules. It depends on
+        # nothing but the standard library, so this pulls in no Dolphin linkage.
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/Source/Core")
+    target_compile_features(moderngekko_launcher_savestates_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.launcher_savestates
+             COMMAND moderngekko_launcher_savestates_test)
+
     add_executable(moderngekko_frontend_config_gamecube_test
         tests/frontend_config_test.cpp
         tools/frontend_config.cpp)

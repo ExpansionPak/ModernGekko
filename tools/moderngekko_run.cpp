@@ -5,6 +5,8 @@
 #include "moderngekko/runtime.hpp"
 #include "netplay_session.hpp"
 
+#include "Common/StringUtil.h"
+
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -42,7 +44,7 @@ void HandleStopSignal(int) { s_stop_requested = 1; }
 void Usage() {
   std::cerr << "usage: " MODERNGEKKO_RUNNER_NAME
                " [--game <extracted-root>] [--module <path>]\n"
-               "       [--user-dir <path>] [--title <text>]\n"
+               "       [--user-dir <path>] [--title <text>] [--load-state <path>]\n"
                "       [--graphics <backend>] [--audio <backend>]\n"
                "       [--mods <directory>] [--no-mods]\n"
                "       [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
@@ -163,6 +165,18 @@ int RunMain(int argc, char **argv) {
       config.user_directory = value("--user-dir");
     else if (arg == "--title")
       config.window_title = value("--title");
+    else if (arg == "--load-state")
+    {
+      // Checked here rather than left to the boot path: a state that is not
+      // there would otherwise boot to the title screen and look like it worked.
+      std::filesystem::path state = StringToPath(value("--load-state"));
+      if (!std::filesystem::is_regular_file(state))
+      {
+        std::cerr << "savestate not found: " << PathToString(state) << '\n';
+        return 2;
+      }
+      config.load_state_path = std::move(state);
+    }
     else if (arg == "--graphics")
       config.graphics.backend = value("--graphics");
     else if (arg == "--audio")
