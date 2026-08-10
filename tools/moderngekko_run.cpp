@@ -4,6 +4,8 @@
 #include "moderngekko/runtime.hpp"
 #include "netplay_session.hpp"
 
+#include "Common/StringUtil.h"
+
 #include <charconv>
 #include <chrono>
 #include <csignal>
@@ -157,10 +159,10 @@ int RunMain(int argc, char **argv) {
     {
       // Checked here rather than left to the boot path: a state that is not
       // there would otherwise boot to the title screen and look like it worked.
-      std::filesystem::path state = value("--load-state");
-      if (!std::filesystem::exists(state))
+      std::filesystem::path state = StringToPath(value("--load-state"));
+      if (!std::filesystem::is_regular_file(state))
       {
-        std::cerr << "savestate not found: " << state.string() << '\n';
+        std::cerr << "savestate not found: " << PathToString(state) << '\n';
         return 2;
       }
       config.load_state_path = std::move(state);

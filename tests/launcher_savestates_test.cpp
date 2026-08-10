@@ -49,6 +49,14 @@ int main()
     return 3;
   }
 
+  const fs::path unicode_name = fs::path(std::u8string(u8"state-プレイヤー.sav"));
+  if (moderngekko::frontend::LauncherSavestateLabel(unicode_name, false) !=
+      "state-プレイヤー.sav")
+  {
+    fs::remove_all(root, ec);
+    return 4;
+  }
+
   fs::remove_all(root, ec);
   return 0;
 }

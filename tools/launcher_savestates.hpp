@@ -25,10 +25,16 @@ inline std::vector<fs::path> ListLauncherSavestates(const fs::path& directory)
   return State::Layout::List(directory);
 }
 
-// The newest entry is worth calling out: it is preselected because it is the one
-// a player almost always wants next, so the label says why it is at the top.
+inline std::string PathText(const fs::path& path)
+{
+  const std::u8string encoded = path.u8string();
+  return {encoded.begin(), encoded.end()};
+}
+
+// The newest entry is worth calling out so the label explains why it is first.
 inline std::string LauncherSavestateLabel(const fs::path& path, bool latest)
 {
-  return latest ? "Latest - " + path.filename().string() : path.filename().string();
+  const std::string filename = PathText(path.filename());
+  return latest ? "Latest - " + filename : filename;
 }
 }  // namespace moderngekko::frontend

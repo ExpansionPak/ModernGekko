@@ -627,9 +627,9 @@ int main(int argc, char** argv)
   // states are written by the running game, not by the launcher.
   const std::vector<fs::path> launcher_savestates =
       moderngekko::frontend::ListLauncherSavestates(user_directory / "StateSaves");
-  // Newest first, so index 0 is the most recent. Default to it when one exists:
-  // resuming is the common case, and "Normal boot" stays one click away.
-  int selected_savestate = launcher_savestates.empty() ? -1 : 0;
+  // Loading is always explicit. StateSaves is shared by games, so selecting the
+  // newest file automatically could try to resume a different title.
+  int selected_savestate = -1;
 
   DialogState dialog;
   std::vector<ControllerOption> controllers = EnumerateControllers();
@@ -1124,7 +1124,8 @@ int main(int argc, char** argv)
       {
         argument_storage.emplace_back("--load-state");
         argument_storage.emplace_back(
-            launcher_savestates[static_cast<std::size_t>(selected_savestate)].string());
+            moderngekko::frontend::PathText(
+                launcher_savestates[static_cast<std::size_t>(selected_savestate)]));
       }
       if (launch_mode == LaunchMode::Host)
         argument_storage.emplace_back("--netplay-host");
