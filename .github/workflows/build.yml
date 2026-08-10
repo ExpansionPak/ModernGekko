@@ -1,0 +1,115 @@
+name: Build
+
+# Runs on pull requests, which is the point: every failure this was written for
+# reached the default branch without anything checking it, because nothing ran
+# on a PR.
+on:
+  pull_request:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+# A new push supersedes the run in flight. The full job builds Dolphin, which is
+# far too expensive to leave duplicated runs queued.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # Everything that needs no Dolphin linkage: the savestate layout, the launcher
+  # helpers, and the config and patch parsing. Minutes rather than the best part
+  # of an hour, so a broken PR is reported quickly and the expensive job is not
+  # the first signal.
+  standalone-tests:
+    name: Standalone tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Configure
+        run: cmake -B build -DCMAKE_BUILD_TYPE=Release
+
+      - name: Build the standalone tests
+        shell: bash
+        run: |
+          targets="
+            moderngekko_launcher_savestates_test
+            moderngekko_dol_patch_test
+            moderngekko_frontend_config_test
+            moderngekko_frontend_config_gamecube_test
+          "
+          for target in $targets; do
+            cmake --build build --config Release --target "$target"
+          done
+
+      - name: Test
+        working-directory: build
+        # Named explicitly rather than filtered by prefix. `moderngekko.*` also
+        # matches tests that link Dolphin, which this job deliberately does not
+        # build, and ctest counts an unbuilt test as a failure rather than
+        # skipping it.
+        run: >
+          ctest --output-on-failure --build-config Release
+          -R "moderngekko\.(launcher_savestates|dol_patch|frontend_config)"
+
+  # The whole thing, including everything that links Dolphin. This is the job
+  # that catches a runtime or launcher break, and the one that costs real time.
+  full-build:
+    name: Full build and test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+          fetch-depth: 1
+
+      - name: Install Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y ninja-build build-essential pkg-config \
+            libevdev-dev libudev-dev libgtk-3-dev libsystemd-dev \
+            libbluetooth-dev libasound2-dev libpulse-dev libgl1-mesa-dev \
+            libxrandr-dev libxi-dev
+
+      - name: Install Windows dependencies
+        if: runner.os == 'Windows'
+        run: choco install ninja --no-progress -y
+
+      - uses: ilammy/msvc-dev-cmd@v1
+        if: runner.os == 'Windows'
+
+      # Dolphin is large enough that a cold build dominates the run. The key
+      # includes the submodule revisions, so a vendored bump correctly misses.
+      - name: Cache compiled objects
+        uses: hendrikmuhs/ccache-action@v1
+        with:
+          key: ${{ matrix.os }}-${{ hashFiles('.gitmodules', '**/CMakeLists.txt') }}
+          variant: sccache
+          max-size: 2G
+
+      - name: Configure
+        run: >
+          cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER_LAUNCHER=sccache -DCMAKE_CXX_COMPILER_LAUNCHER=sccache
+
+      - name: Build
+        run: cmake --build build
+
+      - name: Test
+        working-directory: build
+        # fullbench, fuzzer and zstreamtest are vendored zstd's own tests:
+        # registered by its CMake but never built here, so they would always
+        # report "Not Run".
+        run: ctest --output-on-failure --timeout 300 -E "fullbench|fuzzer|zstreamtest"
