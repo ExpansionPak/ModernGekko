@@ -789,6 +789,17 @@ if(BUILD_TESTING)
     add_test(NAME moderngekko.cpu_primitives
              COMMAND moderngekko_cpu_primitives_test)
 
+    if(WIN32)
+        # Header-only, and Windows-only like the rule it covers.
+        add_executable(moderngekko_cache_affinity_test
+            tests/cache_affinity_test.cpp)
+        target_include_directories(moderngekko_cache_affinity_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+        target_compile_features(moderngekko_cache_affinity_test PRIVATE cxx_std_23)
+        add_test(NAME moderngekko.cache_affinity
+                 COMMAND moderngekko_cache_affinity_test)
+    endif()
+
     add_executable(moderngekko_address_space_test
         tests/address_space_test.cpp
     )

@@ -1,3 +1,4 @@
+#include "cache_affinity.hpp"
 #include "frontend_config.hpp"
 #include "dol_patch.hpp"
 #include "moderngekko/game.hpp"
@@ -15,6 +16,15 @@
 #include <string>
 #include <thread>
 #include <vector>
+
+#if defined(_WIN32)
+// For the affinity/priority setup in main(). WIN32_LEAN_AND_MEAN keeps the
+// winsock and GDI surface out of a translation unit that only needs the
+// processor-topology and process calls.
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#endif
 
 namespace {
 #ifndef MODERNGEKKO_RUNNER_NAME
@@ -386,8 +396,52 @@ int RunMain(int argc, char **argv) {
   return 0;
 }
 
+#if defined(_WIN32)
+// Optionally confine the process to the cores that share the largest L3.
+//
+// The emulated CPU is a single serial instruction stream, so nothing here is
+// about parallelism -- core usage stays at 1.00 either way. It is about cache
+// residency. A recompiled module is one dispatch switch spanning the whole
+// game, which lives or dies on staying in L3, and on a chip with 3D V-Cache on
+// one CCD only, Windows migrating the thread between dies makes it repeatedly
+// lose its working set. Measured on a 9950X3D: 55.41 -> 70.42 fps, +27%.
+//
+// This applies to every Dolphin thread, not only the emulated CPU thread, so it
+// is opt-in. Set MODERNGEKKO_CACHE_AFFINITY=1 to enable it after benchmarking
+// the target machine.
+void PinProcessToLargestCache() {
+  if (!moderngekko::frontend::AffinityEnabled(
+          std::getenv("MODERNGEKKO_CACHE_AFFINITY")))
+    return;
+
+  DWORD length = 0;
+  GetLogicalProcessorInformationEx(RelationCache, nullptr, &length);
+  if (length == 0)
+    return;
+  std::vector<char> buffer(length);
+  if (!GetLogicalProcessorInformationEx(
+          RelationCache,
+          reinterpret_cast<PSYSTEM_LOGICAL_PROCESSOR_INFORMATION_EX>(buffer.data()), &length))
+    return;
+
+  const moderngekko::frontend::CacheDomain domain =
+      moderngekko::frontend::LargestSharedCache(buffer.data(), length);
+  if (!domain)
+    return;
+
+  if (moderngekko::frontend::ApplyCacheDomain(GetCurrentProcess(), domain).affinity_set) {
+    std::cout << "[perf] pinned to the cores sharing the largest L3 (" << (domain.size >> 20)
+              << " MB), mask 0x" << std::hex << static_cast<unsigned long long>(domain.mask)
+              << std::dec << '\n';
+  }
+}
+#endif
+
 int main(int argc, char **argv) {
   try {
+#if defined(_WIN32)
+    PinProcessToLargestCache();
+#endif
     return RunMain(argc, argv);
   } catch (const std::exception &error) {
     std::cerr << "fatal error: " << error.what() << '\n';
