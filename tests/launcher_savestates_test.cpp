@@ -69,10 +69,12 @@ int main()
     return 5;
   }
 
-  const fs::path unicode_name = fs::path(std::u8string(u8"state-プレイヤー.sav"));
+  const std::u8string unicode_filename = u8"state-プレイヤー.sav";
+  const fs::path unicode_name = fs::path(unicode_filename);
   const std::string unicode_label =
       moderngekko::frontend::LauncherSavestateLabel(unicode_name, false);
-  if (unicode_label != "state-プレイヤー.sav")
+  const std::string expected_unicode_label(unicode_filename.begin(), unicode_filename.end());
+  if (unicode_label != expected_unicode_label)
   {
     std::cerr << "unexpected Unicode label: " << unicode_label << '\n';
     fs::remove_all(root, ec);
