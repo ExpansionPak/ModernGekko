@@ -8,6 +8,7 @@
 #include <chrono>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <string>
 
 namespace fs = std::filesystem;
@@ -30,31 +31,52 @@ int main()
   std::ofstream(older).put('a');
   std::ofstream(newer).put('b');
   fs::last_write_time(older, fs::file_time_type::clock::now() - std::chrono::hours(1), ec);
+  if (ec)
+  {
+    std::cerr << "could not set older write time: " << ec.message() << '\n';
+    fs::remove_all(root, ec);
+    return 2;
+  }
   fs::last_write_time(newer, fs::file_time_type::clock::now(), ec);
+  if (ec)
+  {
+    std::cerr << "could not set newer write time: " << ec.message() << '\n';
+    fs::remove_all(root, ec);
+    return 3;
+  }
 
   // Delegation: newest first, straight from the shared definition.
   const auto states = moderngekko::frontend::ListLauncherSavestates(root);
   if (states.size() != 2 || states[0].filename() != newer.filename() ||
       states[1].filename() != older.filename())
   {
+    std::cerr << "unexpected savestate order:";
+    for (const fs::path& state : states)
+      std::cerr << ' ' << moderngekko::frontend::PathText(state.filename());
+    std::cerr << '\n';
     fs::remove_all(root, ec);
-    return 2;
+    return 4;
   }
 
-  if (moderngekko::frontend::LauncherSavestateLabel(states[0], true) !=
-          "Latest - player-latest.sav" ||
-      moderngekko::frontend::LauncherSavestateLabel(states[1], false) != "player-old.sav")
+  const std::string latest_label =
+      moderngekko::frontend::LauncherSavestateLabel(states[0], true);
+  const std::string older_label =
+      moderngekko::frontend::LauncherSavestateLabel(states[1], false);
+  if (latest_label != "Latest - player-latest.sav" || older_label != "player-old.sav")
   {
+    std::cerr << "unexpected labels: " << latest_label << ", " << older_label << '\n';
     fs::remove_all(root, ec);
-    return 3;
+    return 5;
   }
 
   const fs::path unicode_name = fs::path(std::u8string(u8"state-プレイヤー.sav"));
-  if (moderngekko::frontend::LauncherSavestateLabel(unicode_name, false) !=
-      "state-プレイヤー.sav")
+  const std::string unicode_label =
+      moderngekko::frontend::LauncherSavestateLabel(unicode_name, false);
+  if (unicode_label != "state-プレイヤー.sav")
   {
+    std::cerr << "unexpected Unicode label: " << unicode_label << '\n';
     fs::remove_all(root, ec);
-    return 4;
+    return 6;
   }
 
   fs::remove_all(root, ec);
