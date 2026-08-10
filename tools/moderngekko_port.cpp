@@ -481,7 +481,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   }
   else
   {
-    flags = "compile:/O2 /fp:strict";
+    flags = opt == "0" ? "compile:/Od /fp:strict" : "compile:/O2 /fp:strict";
   }
   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
