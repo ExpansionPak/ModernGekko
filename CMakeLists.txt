@@ -599,10 +599,21 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
             MODERNGEKKO_DOLRECOMP_LLVM=1)
     endif()
     add_dependencies(moderngekko-port dolrecomp moderngekko-run)
-    add_custom_command(TARGET moderngekko-port POST_BUILD
+    # A custom target rather than POST_BUILD on moderngekko-port. POST_BUILD only
+    # fires when its own target relinks, so bumping DolRecomp rebuilt the
+    # recompiler while leaving the stale copy in place -- and moderngekko-port
+    # runs the copy beside itself, so it silently kept recompiling with the old
+    # binary and reported success. It cannot hang off dolrecomp either:
+    # add_custom_command(TARGET) requires the target be defined in the same
+    # directory, and dolrecomp comes from add_subdirectory. A custom target is
+    # always considered out of date, and copy_if_different makes that cheap.
+    add_custom_target(moderngekko-port-recompiler ALL
         COMMAND ${CMAKE_COMMAND} -E copy_if_different
                 "$<TARGET_FILE:dolrecomp>"
-                "$<TARGET_FILE_DIR:moderngekko-port>")
+                "$<TARGET_FILE_DIR:moderngekko-port>"
+        DEPENDS dolrecomp
+        COMMENT "Refreshing dolrecomp beside moderngekko-port")
+    add_dependencies(moderngekko-port moderngekko-port-recompiler)
 endif()
 
 if(WIN32)
