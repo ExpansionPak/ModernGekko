@@ -144,21 +144,18 @@ int main() {
       return 10;
   }
 
-  // --- the opt-out ---------------------------------------------------------
-  // Pinned down rather than left to be rediscovered from an inline condition:
-  // any value whose first character is neither NUL nor '0' disables pinning, so
-  // "false" turns it OFF.
+  // --- the opt-in ----------------------------------------------------------
   {
-    using moderngekko::frontend::AffinityDisabled;
-    if (AffinityDisabled(nullptr) || AffinityDisabled("") || AffinityDisabled("0"))
+    using moderngekko::frontend::AffinityEnabled;
+    if (AffinityEnabled(nullptr) || AffinityEnabled("") || AffinityEnabled("0"))
       return 11;
-    if (!AffinityDisabled("1") || !AffinityDisabled("true") || !AffinityDisabled("false"))
+    if (!AffinityEnabled("1") || AffinityEnabled("true") || AffinityEnabled("10"))
       return 12;
   }
 
   // --- the Win32 calls themselves ------------------------------------------
   // Applied to this process and read back out of the OS, so the test observes
-  // what actually happened rather than that two functions were called.
+  // what actually happened rather than merely trusting the return value.
   {
     using moderngekko::frontend::ApplyCacheDomain;
     const HANDLE self = GetCurrentProcess();
@@ -166,8 +163,6 @@ int main() {
     DWORD_PTR system_affinity = 0;
     if (!GetProcessAffinityMask(self, &original_affinity, &system_affinity))
       return 13;
-    const DWORD original_priority = GetPriorityClass(self);
-
     // The lowest core this process is already allowed on: a mask has to be a
     // subset of the process's current affinity or the call fails.
     const KAFFINITY subset = original_affinity & (~original_affinity + 1);
@@ -177,29 +172,24 @@ int main() {
     DWORD_PTR applied = 0;
     DWORD_PTR ignored = 0;
     GetProcessAffinityMask(self, &applied, &ignored);
-    const DWORD priority = GetPriorityClass(self);
-
-    // Restore before reporting, so a failure here does not leave the rest of
-    // the suite pinned to one core at high priority.
+    // Restore before reporting, so a failure does not leave the rest of the
+    // suite pinned to one core.
     SetProcessAffinityMask(self, original_affinity);
-    SetPriorityClass(self, original_priority);
 
     if (!result.affinity_set || applied != subset)
       return 14;
-    if (!result.priority_raised || priority != HIGH_PRIORITY_CLASS)
-      return 15;
 
     DWORD_PTR restored = 0;
     GetProcessAffinityMask(self, &restored, &ignored);
-    if (restored != original_affinity || GetPriorityClass(self) != original_priority)
-      return 16;
+    if (restored != original_affinity)
+      return 15;
 
     // An empty domain must leave the process alone rather than pin it to
     // nothing: there was simply no L3 to find.
     const auto none = ApplyCacheDomain(self, CacheDomain{});
     GetProcessAffinityMask(self, &applied, &ignored);
-    if (none.affinity_set || none.priority_raised || applied != original_affinity)
-      return 17;
+    if (none.affinity_set || applied != original_affinity)
+      return 16;
   }
 
   return 0;

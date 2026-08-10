@@ -397,8 +397,7 @@ int RunMain(int argc, char **argv) {
 }
 
 #if defined(_WIN32)
-// Confine the process to the cores that share the largest L3, and raise its
-// priority.
+// Optionally confine the process to the cores that share the largest L3.
 //
 // The emulated CPU is a single serial instruction stream, so nothing here is
 // about parallelism -- core usage stays at 1.00 either way. It is about cache
@@ -407,11 +406,12 @@ int RunMain(int argc, char **argv) {
 // one CCD only, Windows migrating the thread between dies makes it repeatedly
 // lose its working set. Measured on a 9950X3D: 55.41 -> 70.42 fps, +27%.
 //
-// Selecting by "largest L3" rather than a hardcoded mask keeps this correct
-// elsewhere: where every core shares one L3 the mask covers all of them and
-// this is a no-op. Set MODERNGEKKO_NO_AFFINITY=1 to skip it entirely.
-void PinToLargestCache() {
-  if (moderngekko::frontend::AffinityDisabled(std::getenv("MODERNGEKKO_NO_AFFINITY")))
+// This applies to every Dolphin thread, not only the emulated CPU thread, so it
+// is opt-in. Set MODERNGEKKO_CACHE_AFFINITY=1 to enable it after benchmarking
+// the target machine.
+void PinProcessToLargestCache() {
+  if (!moderngekko::frontend::AffinityEnabled(
+          std::getenv("MODERNGEKKO_CACHE_AFFINITY")))
     return;
 
   DWORD length = 0;
@@ -440,7 +440,7 @@ void PinToLargestCache() {
 int main(int argc, char **argv) {
   try {
 #if defined(_WIN32)
-    PinToLargestCache();
+    PinProcessToLargestCache();
 #endif
     return RunMain(argc, argv);
   } catch (const std::exception &error) {

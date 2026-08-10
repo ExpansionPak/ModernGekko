@@ -62,25 +62,20 @@ inline CacheDomain LargestSharedCache(const void* records, std::size_t bytes, BY
   return best;
 }
 
-// The opt-out, split out so its exact acceptance can be pinned down. Any value
-// whose first character is neither NUL nor '0' disables pinning -- so "0" and an
-// empty value leave it on, and anything else, including "false", turns it off.
-// That is the behaviour this shipped with; it is spelled out here rather than
-// left to be rediscovered from an inline condition.
-inline bool AffinityDisabled(const char* value)
+// Process-wide affinity can interfere with Dolphin's worker threads, so require
+// an exact, explicit opt-in instead of changing every launch by default.
+inline bool AffinityEnabled(const char* value)
 {
-  return value != nullptr && value[0] != '\0' && value[0] != '0';
+  return value != nullptr && value[0] == '1' && value[1] == '\0';
 }
 
 struct PinResult
 {
   bool affinity_set = false;
-  bool priority_raised = false;
 };
 
 // Applies a domain to a process. Separate from choosing one so a test can hand
-// it a real process handle and read the result back out of the OS, rather than
-// taking on trust that the two calls were made.
+// it a real process handle and read the result back out of the OS.
 //
 // An empty domain is not an error: there was nothing to pin to, and the
 // process's existing affinity is left alone.
@@ -90,7 +85,6 @@ inline PinResult ApplyCacheDomain(HANDLE process, const CacheDomain& domain)
   if (!domain)
     return result;
   result.affinity_set = SetProcessAffinityMask(process, domain.mask) != FALSE;
-  result.priority_raised = SetPriorityClass(process, HIGH_PRIORITY_CLASS) != FALSE;
   return result;
 }
 }  // namespace moderngekko::frontend
