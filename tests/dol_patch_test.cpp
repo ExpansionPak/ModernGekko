@@ -61,8 +61,12 @@ int main() {
     std::cerr << error << '\n';
     return 1;
   }
-  std::ifstream input(dol, std::ios::binary);
-  input.read(reinterpret_cast<char *>(bytes.data()), bytes.size());
+  // Scoped: Windows will not delete a file that is still open, so an ifstream
+  // left open here makes the remove_all below throw on that platform only.
+  {
+    std::ifstream input(dol, std::ios::binary);
+    input.read(reinterpret_cast<char *>(bytes.data()), bytes.size());
+  }
   if (ReadBE32(bytes.data() + 0x100) != 0x4800000C ||
       ReadBE32(bytes.data() + 0x104) != 0x7C000050)
     return 1;
