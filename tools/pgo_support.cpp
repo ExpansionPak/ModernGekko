@@ -71,10 +71,31 @@ Workspace DeriveWorkspace(const fs::path& profile_dir, const fs::path& output,
   Workspace workspace;
   workspace.root = profile_dir.empty() ? output / std::string(disc_id) / "pgo" : profile_dir;
   workspace.raw = workspace.root / "raw";
-  workspace.generate_modules = workspace.root / "generate-modules";
+  workspace.generate_modules = workspace.root / "gen";
   workspace.merged_profile = workspace.root / "merged.profdata";
   workspace.manifest = workspace.root / "pgo-manifest.txt";
   return workspace;
+}
+
+std::size_t LongestModuleObjectPathLength(const fs::path& cache_root, std::string_view disc_id)
+{
+  // Measured against a real build rather than guessed at: the cache key is a
+  // 64-character DOL digest, a dash and a 16-character identity hash; CMake
+  // interposes a 32-character directory hash; and the longest name emitted is a
+  // chunk of the form chunk_0012_text1_800316C0.c, which the response file adds
+  // ".obj.rsp" to.
+  constexpr std::size_t CACHE_KEY = 64 + 1 + 16;
+  constexpr std::size_t CMAKE_DIRECTORY_HASH = 32;
+  constexpr std::size_t LONGEST_OBJECT_NAME = std::string_view("chunk_0000_text1_80000000.c.obj.rsp").size();
+
+  std::size_t length = PathText(cache_root).size();
+  length += 1 + disc_id.size();                                 // /<disc>
+  length += 1 + CACHE_KEY;                                      // /<key>
+  length += std::string_view("/module-build/CMakeFiles/").size();
+  length += 1 + disc_id.size() + std::string_view("_recomp.dir").size();  // g<disc>_recomp.dir
+  length += 1 + CMAKE_DIRECTORY_HASH;
+  length += 1 + LONGEST_OBJECT_NAME;
+  return length;
 }
 
 std::string PathText(const fs::path& path)

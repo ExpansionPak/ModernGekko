@@ -918,6 +918,27 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
   const moderngekko::pgo::Workspace workspace =
       moderngekko::pgo::DeriveWorkspace(pgo_options.profile_dir, options.output, game.disc_id);
 
+#if defined(_WIN32)
+  // The generation build nests a second module cache under the workspace, which
+  // is enough to push an otherwise fine cache location past Windows' limit. The
+  // build that would fail takes twenty minutes to get there and then reports
+  // only "Unable to create file", so it is worth one second here instead.
+  for (const auto& [label, cache_root] :
+       {std::pair<std::string_view, const fs::path&>{"--profile-dir", workspace.generate_modules},
+        std::pair<std::string_view, const fs::path&>{"--output", options.output}})
+  {
+    const std::size_t longest =
+        moderngekko::pgo::LongestModuleObjectPathLength(cache_root, game.disc_id);
+    if (longest <= moderngekko::pgo::WINDOWS_PATH_LIMIT)
+      continue;
+    std::cerr << "the module build under " << cache_root << " would need paths of up to "
+              << longest << " characters, and Windows refuses to create a file past "
+              << moderngekko::pgo::WINDOWS_PATH_LIMIT << ".\n"
+              << "Pass a shorter " << label << " (for example " << label << " C:\\mg-pgo).\n";
+    return 1;
+  }
+#endif
+
   std::error_code ec;
   // A .profraw left by an earlier run describes an earlier module. Merged in,
   // it trains this one on code that may no longer exist, and the result still

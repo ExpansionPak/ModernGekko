@@ -131,8 +131,8 @@ void TestWorkspace()
   Check(derived.root == fs::path("/cache/modules") / "GM4E01" / "pgo",
         "the derived workspace root is not under the output directory and disc ID");
   Check(derived.raw == derived.root / "raw", "raw directory is not under the workspace root");
-  Check(derived.generate_modules == derived.root / "generate-modules",
-        "generate-modules directory is not under the workspace root");
+  Check(derived.generate_modules == derived.root / "gen",
+        "the generation cache is not under the workspace root");
   Check(derived.merged_profile == derived.root / "merged.profdata",
         "merged profile is not under the workspace root");
   Check(derived.manifest == derived.root / "pgo-manifest.txt",
@@ -148,6 +148,33 @@ void TestWorkspace()
         "--profile-dir did not win over the derived location");
   Check(explicit_dir.raw == fs::path("/build/pgo/GM4E01") / "raw",
         "--profile-dir did not carry through to the raw directory");
+}
+
+// This is the check that turns a twenty-minute build failing with "Unable to
+// create file" into an immediate message, so it has to be measured against the
+// real layout rather than a round number.
+void TestModuleObjectPathLength()
+{
+  // The path this was written for. It failed a real GM4E01 build at 260
+  // characters with the old, longer workspace directory name.
+  const std::size_t observed = pgo::LongestModuleObjectPathLength(
+      "C:/Users/douglaswhittingham/mg-pgo-e2e/c/pgo/generate-modules", "GM4E01");
+  Check(observed > pgo::WINDOWS_PATH_LIMIT,
+        "the path that really failed is not reported as too long (" +
+            std::to_string(observed) + ")");
+
+  // A short workspace has to pass, or the check refuses builds that work.
+  const std::size_t shortest = pgo::LongestModuleObjectPathLength("C:/mg/pgo/gen", "GM4E01");
+  Check(shortest <= pgo::WINDOWS_PATH_LIMIT,
+        "a short workspace is reported as too long (" + std::to_string(shortest) + ")");
+
+  // It has to actually depend on the root, or it is a constant in disguise.
+  Check(pgo::LongestModuleObjectPathLength("C:/a", "GM4E01") <
+            pgo::LongestModuleObjectPathLength("C:/aaaaaaaaaa", "GM4E01"),
+        "the estimate does not grow with the cache root");
+  Check(pgo::LongestModuleObjectPathLength("C:/a", "GM4E01") ==
+            pgo::LongestModuleObjectPathLength("C:/a", "RMCE01"),
+        "the estimate changed for an equally long disc ID");
 }
 
 void TestManifest()
@@ -293,6 +320,7 @@ int main()
   TestSummaryParsing();
   TestVersionParsing();
   TestWorkspace();
+  TestModuleObjectPathLength();
   TestManifest();
   TestProfdataCandidates();
   TestPathFormatting();

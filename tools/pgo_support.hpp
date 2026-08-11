@@ -48,8 +48,11 @@ struct PgoBuildOptions
 struct Workspace
 {
   fs::path root;
-  fs::path raw;               // <root>/raw          -- .profraw from the training run
-  fs::path generate_modules;  // <root>/generate-modules -- private module cache
+  fs::path raw;               // <root>/raw   -- .profraw from the training run
+  // <root>/gen -- the instrumented module's own private cache root. Named that
+  // tersely on purpose: it prefixes a module build path that is already close
+  // to Windows' limit. See LongestModuleObjectPathLength.
+  fs::path generate_modules;
   fs::path merged_profile;    // <root>/merged.profdata
   fs::path manifest;          // <root>/pgo-manifest.txt
 };
@@ -58,6 +61,23 @@ struct Workspace
 // so a repeat run reuses the same workspace instead of scattering profiles.
 Workspace DeriveWorkspace(const fs::path& profile_dir, const fs::path& output,
                           std::string_view disc_id);
+
+// Windows refuses to create a file whose full path exceeds this, and ninja does
+// not use the \\?\ extended-length prefix, so the module build hits it as
+// "Unable to create file. No such file or directory" with nothing said about
+// paths.
+inline constexpr std::size_t WINDOWS_PATH_LIMIT = 260;
+
+// The longest path the module build will try to create under `cache_root`:
+//
+//   <cache_root>/<disc>/<64-hex dol>-<16-hex key>/module-build/CMakeFiles/
+//       g<disc>_recomp.dir/<32-hex>/<longest source name>.c.obj.rsp
+//
+// A plain build already sits close to the limit; pgo-run adds a workspace
+// directory in front of it, which is enough to push a normal cache location
+// over. Checking up front turns a twenty-minute build that dies with a
+// confusing ninja error into an immediate message naming --profile-dir.
+std::size_t LongestModuleObjectPathLength(const fs::path& cache_root, std::string_view disc_id);
 
 // UTF-8. std::filesystem::path::string() narrows through the active code page
 // on Windows, which mangles any path the user's code page cannot represent.

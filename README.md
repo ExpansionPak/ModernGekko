@@ -101,10 +101,17 @@ Everything a run produces lives under `--profile-dir`, or under
 ```
 <profile-dir>/
     raw/                 .profraw from the training run
-    generate-modules/    the instrumented module's own private cache
+    gen/                 the instrumented module's own private cache
     merged.profdata      the merged, validated profile
     pgo-manifest.txt     how the final module was produced
 ```
+
+On Windows, note that the generation build nests a second module cache under
+this directory, and a module build path is already close to the 260-character
+limit. `pgo-run` measures the longest path it would need before building
+anything and stops immediately with a message naming `--profile-dir` if it would
+not fit, rather than failing twenty minutes later inside ninja. If you hit it,
+pass something short such as `--profile-dir C:\mg-pgo`.
 
 The instrumented module is built into a **private** cache root, so it can never
 be written to the real `active-module.txt`. The PGO module becomes active only
