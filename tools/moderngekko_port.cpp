@@ -93,6 +93,15 @@ std::string Text(const fs::path& value)
   return moderngekko::pgo::PathText(value);
 }
 
+std::string Trim(std::string value)
+{
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+    value.erase(value.begin());
+  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+    value.pop_back();
+  return value;
+}
+
 std::string FirstLine(std::string_view text)
 {
   const std::size_t end = text.find('\n');
@@ -110,8 +119,11 @@ std::string LineContaining(std::string_view text, std::string_view needle)
     const std::size_t end = text.find('\n', start);
     const std::string_view line =
         text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
+    // Trimmed: llvm-profdata indents its version banner under the "LLVM
+    // (http://llvm.org/):" heading, and that indentation would otherwise reach
+    // the manifest.
     if (line.find(needle) != std::string_view::npos)
-      return FirstLine(line);
+      return Trim(FirstLine(line));
     if (end == std::string_view::npos)
       break;
     start = end + 1;
@@ -206,15 +218,6 @@ std::uint64_t Fnv1a(std::string_view value)
   for (unsigned char c : value)
     hash = (hash ^ c) * 0x100000001b3ULL;
   return hash;
-}
-
-std::string Trim(std::string value)
-{
-  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-    value.erase(value.begin());
-  while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-    value.pop_back();
-  return value;
 }
 
 std::uint32_t ReadBE32(const std::uint8_t* data)
