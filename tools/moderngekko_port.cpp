@@ -85,6 +85,14 @@ std::string Quote(const fs::path& value)
   return QuoteText(moderngekko::pgo::PathText(value));
 }
 
+// For printing. Streaming a path inserts quotes and doubles every backslash,
+// which is unreadable in a summary block a developer is meant to copy a path
+// out of.
+std::string Text(const fs::path& value)
+{
+  return moderngekko::pgo::PathText(value);
+}
+
 std::string FirstLine(std::string_view text)
 {
   const std::size_t end = text.find('\n');
@@ -387,7 +395,18 @@ bool PatchDol(const fs::path& input_path, const fs::path& output_path,
 std::string ReadCommand(const std::string& command)
 {
 #if defined(_WIN32)
-  FILE* pipe = _wpopen(Widen(command).c_str(), L"r");
+  // _wpopen runs the command through `cmd /c`, and cmd drops the quotes around
+  // a program path containing spaces as soon as a second quoted argument
+  // follows it:
+  //
+  //   "C:\Program Files\LLVM\bin\llvm-profdata.exe" show "C:\...\merged.profdata"
+  //   -> 'C:\Program' is not recognized as an internal or external command
+  //
+  // One quoted argument is fine, which is why probing `llvm-profdata --version`
+  // worked and reading the profile summary did not. Wrapping the whole command
+  // in one more pair makes cmd strip exactly that pair and pass the rest
+  // through untouched, which is the documented behaviour of `cmd /c "..."`.
+  FILE* pipe = _wpopen(Widen("\"" + command + "\"").c_str(), L"r");
 #else
   FILE* pipe = popen(command.c_str(), "r");
 #endif
@@ -405,7 +424,11 @@ std::string ReadCommand(const std::string& command)
   return output;
 }
 
-bool RunCommand(const std::string& command)
+// The exit status, or -1 if the command could not be launched at all. pgo-run
+// reports the training run's status rather than only that it was nonzero: a
+// game closed normally exits 0, and every other value is a different problem to
+// diagnose.
+int RunCommandStatus(const std::string& command)
 {
   std::cout << "+ " << command << '\n';
 #if defined(_WIN32)
@@ -419,17 +442,31 @@ bool RunCommand(const std::string& command)
                       &startup, &process))
   {
     std::cerr << "failed to launch command: Windows error " << GetLastError() << '\n';
-    return false;
+    return -1;
   }
   WaitForSingleObject(process.hProcess, INFINITE);
   DWORD exit_code = 1;
   const bool got_exit_code = GetExitCodeProcess(process.hProcess, &exit_code) != FALSE;
   CloseHandle(process.hThread);
   CloseHandle(process.hProcess);
-  return got_exit_code && exit_code == 0;
+  return got_exit_code ? static_cast<int>(exit_code) : -1;
 #else
-  return std::system(command.c_str()) == 0;
+  const int status = std::system(command.c_str());
+  if (status == -1)
+    return -1;
+#if defined(WIFEXITED)
+  if (WIFEXITED(status))
+    return WEXITSTATUS(status);
+  return -1;
+#else
+  return status;
 #endif
+#endif
+}
+
+bool RunCommand(const std::string& command)
+{
+  return RunCommandStatus(command) == 0;
 }
 
 fs::path SiblingExecutable(const char* argv0, std::string name)
@@ -828,7 +865,7 @@ int PgoFailure(std::string_view stage, const moderngekko::pgo::Workspace& worksp
   std::cerr << "\nPGO run failed during: " << stage << '\n'
             << "The previously active module is unchanged; no instrumented module was "
                "published.\n"
-            << "Work files kept for diagnosis: " << workspace.root << '\n';
+            << "Work files kept for diagnosis: " << Text(workspace.root) << '\n';
   return 1;
 }
 
@@ -907,7 +944,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
     std::cerr << "llvm-profdata is LLVM " << *profdata_major << " but clang is LLVM "
               << *clang_major << ".\n"
               << "  clang:         " << clang_version << '\n'
-              << "  llvm-profdata: " << llvm_profdata_version << " (" << llvm_profdata << ")\n"
+              << "  llvm-profdata: " << llvm_profdata_version << " (" << Text(llvm_profdata) << ")\n"
               << "The profile formats are not guaranteed compatible across major versions.\n"
                  "Pass --llvm-profdata with the matching binary.\n";
     return 1;
@@ -931,7 +968,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
         moderngekko::pgo::LongestModuleObjectPathLength(cache_root, game.disc_id);
     if (longest <= moderngekko::pgo::WINDOWS_PATH_LIMIT)
       continue;
-    std::cerr << "the module build under " << cache_root << " would need paths of up to "
+    std::cerr << "the module build under " << Text(cache_root) << " would need paths of up to "
               << longest << " characters, and Windows refuses to create a file past "
               << moderngekko::pgo::WINDOWS_PATH_LIMIT << ".\n"
               << "Pass a shorter " << label << " (for example " << label << " C:\\mg-pgo).\n";
@@ -948,14 +985,14 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
   fs::create_directories(workspace.raw, ec);
   if (ec)
   {
-    std::cerr << "could not prepare " << workspace.raw << ": " << ec.message() << '\n';
+    std::cerr << "could not prepare " << Text(workspace.raw) << ": " << ec.message() << '\n';
     return 1;
   }
   fs::create_directories(workspace.generate_modules, ec);
 
-  std::cout << "PGO workspace: " << workspace.root << "\n"
+  std::cout << "PGO workspace: " << Text(workspace.root) << "\n"
             << "clang:         " << clang_version << "\n"
-            << "llvm-profdata: " << llvm_profdata_version << " (" << llvm_profdata << ")\n";
+            << "llvm-profdata: " << llvm_profdata_version << " (" << Text(llvm_profdata) << ")\n";
 
   std::cout << "\n[1/6] Building the instrumented module\n";
   BuildOptions generate_options = options;
@@ -983,9 +1020,10 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
                       Quote(root) + " --module " + Quote(*instrumented);
     for (const std::string& arg : options.runner_arguments)
       run += " " + Quote(arg);
-    if (!RunCommand(run))
+    const int status = RunCommandStatus(run);
+    if (status != 0)
     {
-      std::cerr << "\nthe training run exited with a failure status.\n"
+      std::cerr << "\nthe training run exited with status " << status << ".\n"
                    "The profiling runtime flushes on a normal shutdown, so a crashed or "
                    "killed run has not written a usable profile.\n";
       return PgoFailure("training run", workspace);
@@ -1008,7 +1046,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
   }
   if (nonempty == 0)
   {
-    std::cerr << "no nonempty .profraw was written to " << workspace.raw << ".\n"
+    std::cerr << "no nonempty .profraw was written to " << Text(workspace.raw) << ".\n"
               << "The instrumented module did not flush a profile. Close the game through "
                  "its own quit path rather than killing it.\n";
     return PgoFailure("raw-profile discovery", workspace);
@@ -1025,7 +1063,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
   if (ec || merged_size == 0)
   {
     std::cerr << "llvm-profdata reported success but produced no usable "
-              << workspace.merged_profile << '\n';
+              << Text(workspace.merged_profile) << '\n';
     return PgoFailure("profile merge", workspace);
   }
 
@@ -1043,7 +1081,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
             << "Total raw-profile bytes:   " << raw_bytes << '\n'
             << "Total functions:           " << summary.total_functions << '\n'
             << "Maximum function count:    " << summary.maximum_function_count << '\n'
-            << "Merged profile:            " << workspace.merged_profile << '\n';
+            << "Merged profile:            " << Text(workspace.merged_profile) << '\n';
 
   const auto profile_hash = moderngekko::HashFileSha256(workspace.merged_profile);
   if (!profile_hash)
@@ -1072,7 +1110,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
   const auto module_hash = moderngekko::HashFileSha256(*module);
   if (!module_hash)
   {
-    std::cerr << "the PGO module is missing after a successful build: " << *module << '\n';
+    std::cerr << "the PGO module is missing after a successful build: " << Text(*module) << '\n';
     return PgoFailure("final module validation", workspace);
   }
 
@@ -1101,14 +1139,14 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
             << "Backend:               " << options.backend << '\n'
             << "Training run:          completed normally\n"
             << "Raw profiles:          " << raw_profiles.size() << '\n'
-            << "Merged profile:        " << workspace.merged_profile << '\n'
+            << "Merged profile:        " << Text(workspace.merged_profile) << '\n'
             << "Merged profile SHA256: " << *profile_hash << '\n'
-            << "Final module:          " << *module << '\n'
+            << "Final module:          " << Text(*module) << '\n'
             << "Final module SHA256:   " << *module_hash << '\n'
-            << "Active module updated: yes (" << active << ")\n"
-            << "PGO manifest:          " << workspace.manifest << '\n';
+            << "Active module updated: yes (" << Text(active) << ")\n"
+            << "PGO manifest:          " << Text(workspace.manifest) << '\n';
   if (pgo_options.keep_work)
-    std::cout << "Work files kept:       " << workspace.root << '\n';
+    std::cout << "Work files kept:       " << Text(workspace.root) << '\n';
   return 0;
 }
 
