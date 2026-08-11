@@ -1,3 +1,6 @@
+#include "pgo_support.hpp"
+#include "port_command_line.hpp"
+
 #include "moderngekko/game.hpp"
 #include "moderngekko/module_abi.h"
 
@@ -12,6 +15,7 @@
 #include <fstream>
 #include <iomanip>
 #include <iostream>
+#include <map>
 #include <optional>
 #include <sstream>
 #include <string>
@@ -32,21 +36,14 @@ constexpr std::string_view RECOMPCORE_REVISION = "6ed835397d984f2ac8cccb89589ef5
 constexpr std::string_view DOLRECOMP_REVISION =
     "native-llvm-v4";
 
-struct BuildOptions
-{
-  std::string toolchain = "auto";
-  // Empty means "leave the module template's own default alone". Any other
-  // value is forwarded as RECOMPCORE_MODULE_OPT_LEVEL and folded into the
-  // cache key, so an -O3 module cannot collide with an -O2 one.
-  std::string opt_level;
+using moderngekko::port::BuildOptions;
+using moderngekko::port::PgoRunOptions;
+
 #if defined(MODERNGEKKO_DOLRECOMP_LLVM)
-  std::string backend = "llvm";
+constexpr std::string_view DEFAULT_BACKEND = "llvm";
 #else
-  std::string backend = "c";
+constexpr std::string_view DEFAULT_BACKEND = "c";
 #endif
-  fs::path output;
-  std::vector<std::string> runner_arguments;
-};
 
 fs::path DefaultOutput()
 {
@@ -68,19 +65,132 @@ std::string Suffix()
 #endif
 }
 
-std::string Quote(const fs::path& value)
+std::string QuoteText(const std::string& text)
 {
 #if defined(_WIN32)
-  std::string text = value.string();
   return '"' + text + '"';
 #else
-  std::string text = value.string();
   std::string result = "'";
   for (char c : text)
     result += c == '\'' ? "'\\''" : std::string(1, c);
   return result + "'";
 #endif
 }
+
+// UTF-8 throughout. path::string() narrows through the active code page on
+// Windows, so a module cache under a path the code page cannot represent used
+// to reach the compiler as question marks.
+std::string Quote(const fs::path& value)
+{
+  return QuoteText(moderngekko::pgo::PathText(value));
+}
+
+std::string FirstLine(std::string_view text)
+{
+  const std::size_t end = text.find('\n');
+  std::string line(end == std::string_view::npos ? text : text.substr(0, end));
+  while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+    line.pop_back();
+  return line;
+}
+
+std::string LineContaining(std::string_view text, std::string_view needle)
+{
+  std::size_t start = 0;
+  while (start <= text.size())
+  {
+    const std::size_t end = text.find('\n', start);
+    const std::string_view line =
+        text.substr(start, end == std::string_view::npos ? std::string_view::npos : end - start);
+    if (line.find(needle) != std::string_view::npos)
+      return FirstLine(line);
+    if (end == std::string_view::npos)
+      break;
+    start = end + 1;
+  }
+  return {};
+}
+
+#if defined(_WIN32)
+std::wstring Widen(std::string_view utf8)
+{
+  if (utf8.empty())
+    return {};
+  const int size = MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()),
+                                       nullptr, 0);
+  std::wstring wide(static_cast<std::size_t>(size), L'\0');
+  MultiByteToWideChar(CP_UTF8, 0, utf8.data(), static_cast<int>(utf8.size()), wide.data(), size);
+  return wide;
+}
+
+std::string Narrow(std::wstring_view wide)
+{
+  if (wide.empty())
+    return {};
+  const int size = WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()),
+                                       nullptr, 0, nullptr, nullptr);
+  std::string utf8(static_cast<std::size_t>(size), '\0');
+  WideCharToMultiByte(CP_UTF8, 0, wide.data(), static_cast<int>(wide.size()), utf8.data(), size,
+                      nullptr, nullptr);
+  return utf8;
+}
+#endif
+
+// Child processes inherit the process environment, so setting a variable here
+// is how DOLRECOMP_LLVM_PGO and LLVM_PROFILE_FILE reach DolRecomp and the
+// runner without an environment block being threaded through every call. The
+// restore is in the destructor rather than at the end of the happy path
+// because a failed stage returns early, and a leaked DOLRECOMP_LLVM_PGO=gen
+// would instrument every later build in the same shell.
+class ScopedEnvironment
+{
+public:
+  ScopedEnvironment() = default;
+  ScopedEnvironment(const ScopedEnvironment&) = delete;
+  ScopedEnvironment& operator=(const ScopedEnvironment&) = delete;
+
+  ~ScopedEnvironment()
+  {
+    for (const auto& [name, value] : m_saved)
+      Write(name, value.value_or(std::string{}));
+  }
+
+  void Set(const std::string& name, const std::string& value)
+  {
+    if (!m_saved.contains(name))
+      m_saved.emplace(name, Read(name));
+    Write(name, value);
+  }
+
+private:
+  static std::optional<std::string> Read(const std::string& name)
+  {
+#if defined(_WIN32)
+    if (const wchar_t* value = _wgetenv(Widen(name).c_str()))
+      return Narrow(value);
+#else
+    if (const char* value = std::getenv(name.c_str()))
+      return std::string(value);
+#endif
+    return std::nullopt;
+  }
+
+  // An empty value removes the variable on both platforms, which is what the
+  // restore of a previously unset variable needs.
+  static void Write(const std::string& name, const std::string& value)
+  {
+#if defined(_WIN32)
+    _wputenv_s(Widen(name).c_str(), Widen(value).c_str());
+#else
+    if (value.empty())
+      unsetenv(name.c_str());
+    else
+      setenv(name.c_str(), value.c_str(), 1);
+#endif
+  }
+
+  std::map<std::string, std::optional<std::string>> m_saved;
+};
 
 std::uint64_t Fnv1a(std::string_view value)
 {
@@ -277,7 +387,7 @@ bool PatchDol(const fs::path& input_path, const fs::path& output_path,
 std::string ReadCommand(const std::string& command)
 {
 #if defined(_WIN32)
-  FILE* pipe = _popen(command.c_str(), "r");
+  FILE* pipe = _wpopen(Widen(command).c_str(), L"r");
 #else
   FILE* pipe = popen(command.c_str(), "r");
 #endif
@@ -299,12 +409,13 @@ bool RunCommand(const std::string& command)
 {
   std::cout << "+ " << command << '\n';
 #if defined(_WIN32)
-  std::vector<char> command_line(command.begin(), command.end());
-  command_line.push_back('\0');
-  STARTUPINFOA startup{};
+  std::wstring wide = Widen(command);
+  std::vector<wchar_t> command_line(wide.begin(), wide.end());
+  command_line.push_back(L'\0');
+  STARTUPINFOW startup{};
   startup.cb = sizeof(startup);
   PROCESS_INFORMATION process{};
-  if (!CreateProcessA(nullptr, command_line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr,
+  if (!CreateProcessW(nullptr, command_line.data(), nullptr, nullptr, TRUE, 0, nullptr, nullptr,
                       &startup, &process))
   {
     std::cerr << "failed to launch command: Windows error " << GetLastError() << '\n';
@@ -330,6 +441,34 @@ fs::path SiblingExecutable(const char* argv0, std::string name)
 #endif
   const fs::path sibling = self.parent_path() / name;
   return fs::is_regular_file(sibling) ? sibling : fs::path(std::move(name));
+}
+
+// DolRecomp reads these from the ambient environment and they change the code
+// it generates, but none of them were in the module cache key: a module built
+// with DOLRECOMP_LLVM_CPU=znver3 answered a later build with the variable
+// unset. The names are the pinned recompiler's own getenv calls -- the PGO
+// three are excluded because this tool sets them itself, and the profile
+// belongs in the key by content rather than by path.
+//
+// Nothing is contributed when none are set, so a default environment keeps the
+// cache entries it already has.
+std::string DolRecompCodegenIdentity()
+{
+  constexpr std::array<const char*, 7> names = {
+      "DOLRECOMP_C_CHUNK_INSTRUCTIONS", "DOLRECOMP_LLVM_CHUNK_INSTRUCTIONS",
+      "DOLRECOMP_LLVM_CPU",             "DOLRECOMP_LLVM_FEATURES",
+      "DOLRECOMP_LLVM_TARGET",          "DOLRECOMP_DISPATCH_LOOKUP",
+      "DOLRECOMP_UNSAFE_DIRECT_CALLS"};
+  std::string identity;
+  for (const char* name : names)
+  {
+    const char* value = std::getenv(name);
+    if (!value)
+      continue;
+    identity += identity.empty() ? "|dolrecomp_env=" : ",";
+    identity += std::string(name) + "=" + value;
+  }
+  return identity;
 }
 
 std::string PlatformName(moderngekko::GamePlatform platform)
@@ -483,13 +622,41 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   {
     flags = opt == "0" ? "compile:/Od /fp:strict" : "compile:/O2 /fp:strict";
   }
+
+  // -fprofile-generate has to reach the link and not only the compiles: the
+  // profiling runtime that writes the .profraw comes from the link line, and an
+  // instrumented module that never linked it produces no profile at all. For
+  // the LLVM backend the chunks arrive as objects DolRecomp already
+  // instrumented, so the link is the only place these flags matter to them.
+  std::string pgo_compile_flags;
+  if (options.pgo.mode == moderngekko::pgo::PgoMode::Generate)
+  {
+    pgo_compile_flags = "-fprofile-generate";
+  }
+  else if (options.pgo.mode == moderngekko::pgo::PgoMode::Use)
+  {
+    pgo_compile_flags =
+        "-fprofile-use=" + moderngekko::pgo::ClangPathText(options.pgo.merged_profile);
+    // A profile that no longer describes the code is the exact failure this
+    // workflow exists to avoid measuring through, so it is an error.
+    // -Wprofile-instr-unprofiled is not the same thing: a training run that
+    // never entered a function is normal, and there are thousands of them.
+    pgo_compile_flags += " -Wno-profile-instr-unprofiled";
+    if (options.pgo.reject_stale_profile)
+      pgo_compile_flags += " -Werror=profile-instr-out-of-date";
+  }
+
   const std::string identity = std::string(RECOMPCORE_REVISION) + "|dolrecomp=" +
       std::string(DOLRECOMP_REVISION) + "|module-abi=" +
       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
       std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" + compiler_identity + "|" +
       std::string(architecture) + "|" + flags + "|backend=" + options.backend +
       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
-      *dolrecomp_hash;
+      *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
+      DolRecompCodegenIdentity();
+  // Deliberately NOT pgo_compile_flags: those carry the workspace path the
+  // profile happens to sit at, and the same profile copied elsewhere is the
+  // same build. PgoCacheIdentity carries the profile's content digest instead.
   std::ostringstream key_tail;
   key_tail << std::hex << std::setfill('0') << std::setw(16) << Fnv1a(identity);
   const std::string cache_key = game.dol_sha256 + "-" + key_tail.str();
@@ -521,6 +688,8 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
              << "flags=" << flags << '\n'
              << "backend=" << options.backend << '\n'
              << "patches=" << patches.fingerprint << '\n';
+    if (options.pgo.mode != moderngekko::pgo::PgoMode::Off)
+      manifest << moderngekko::pgo::FormatPgoManifest(options.pgo, options.pgo_facts);
     fs::create_directories(options.output / game.disc_id);
     std::ofstream active(options.output / game.disc_id / "active-module.txt");
     active << module.string() << '\n';
@@ -544,6 +713,26 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
     std::cout << "applied " << patches.entries.size() << " default DOL patches\n";
   }
   const fs::path generated_parent = artifact / "dolrecomp-output";
+  // The LLVM backend emits and codegens IR in-process, so no CFLAGS reach its
+  // chunks; its instrumentation is two passes selected by these variables. The
+  // C backend needs none of this -- its chunks are C, and -fprofile-generate
+  // in CMAKE_C_FLAGS below already covers them.
+  ScopedEnvironment recompiler_environment;
+  if (options.backend == "llvm")
+  {
+    if (options.pgo.mode == moderngekko::pgo::PgoMode::Generate)
+    {
+      recompiler_environment.Set("DOLRECOMP_LLVM_PGO", "gen");
+    }
+    else if (options.pgo.mode == moderngekko::pgo::PgoMode::Use)
+    {
+      recompiler_environment.Set("DOLRECOMP_LLVM_PGO", "use");
+      recompiler_environment.Set("DOLRECOMP_LLVM_PROFILE",
+                                 moderngekko::pgo::PathText(options.pgo.merged_profile));
+      recompiler_environment.Set("DOLRECOMP_LLVM_PGO_STALE",
+                                 options.pgo.reject_stale_profile ? "error" : "warn");
+    }
+  }
   std::string generate = Quote(dolrecomp) + " -j" +
                          std::to_string(std::max(1u, std::thread::hardware_concurrency())) +
                          " --backend=" + options.backend + " ";
@@ -598,6 +787,16 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
            : " -DRECOMPCORE_MODULE_OPT_LEVEL=" + options.opt_level) +
       " -DCHASSIS_ABI_DIR=" +
       Quote(source_root / "vendor/dolphin/Source/Core/Core/PowerPC/StaticRecomp");
+  // The module template has no hook of its own for extra flags, and CMake's
+  // shared-library link rule expands CMAKE_C_FLAGS as well as the linker
+  // flags, so setting both is what puts -fprofile-generate on the compile
+  // lines and on the link line. The linker variable is set explicitly rather
+  // than relied on implicitly, because "it happens to be on the link line
+  // too" is not a property worth depending on for the one flag that has to be
+  // there.
+  if (!pgo_compile_flags.empty())
+    configure += " -DCMAKE_C_FLAGS=" + QuoteText(pgo_compile_flags) +
+                 " -DCMAKE_SHARED_LINKER_FLAGS=" + QuoteText(pgo_compile_flags);
   if (!RunCommand(configure) ||
       !RunCommand("cmake --build " + Quote(module_build) + " -j" +
                   std::to_string(compile_jobs)))
@@ -611,61 +810,317 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   return publish_module();
 }
 
+fs::path ResolveExecutable(const std::string& name)
+{
+#if defined(_WIN32)
+  const std::string located = FirstLine(ReadCommand("where " + name + " 2>NUL"));
+#else
+  const std::string located = FirstLine(ReadCommand("command -v " + name + " 2>/dev/null"));
+#endif
+  return located.empty() ? fs::path(name) : fs::path(located);
+}
+
+// Every failure exit goes through here, so the two things that must be true of
+// a failed run -- a nonzero status, and an active module that is still the
+// user's -- are stated once instead of at eight return sites.
+int PgoFailure(std::string_view stage, const moderngekko::pgo::Workspace& workspace)
+{
+  std::cerr << "\nPGO run failed during: " << stage << '\n'
+            << "The previously active module is unchanged; no instrumented module was "
+               "published.\n"
+            << "Work files kept for diagnosis: " << workspace.root << '\n';
+  return 1;
+}
+
+int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
+           const PgoRunOptions& pgo_options)
+{
+  const auto inspected = moderngekko::InspectGame(root);
+  if (!inspected)
+  {
+    std::cerr << "invalid extracted game: " << inspected.error << '\n';
+    return 1;
+  }
+  const auto& game = *inspected.metadata;
+
+  // Instrumentation PGO is Clang's. GCC writes .gcda that llvm-profdata cannot
+  // merge, MSVC's PGO is a different mechanism again, and DolRecomp's LLVM
+  // backend applies an LLVM .profdata or nothing. Falling back would produce a
+  // module that builds, runs, and is not profiled.
+  if (options.toolchain == "auto")
+    options.toolchain = "clang";
+  if (options.toolchain != "clang")
+  {
+    std::cerr << "pgo-run requires Clang and a matching llvm-profdata; --toolchain "
+              << options.toolchain << " cannot produce an instrumented module.\n"
+              << "Use --toolchain clang, or `build` for a non-PGO module.\n";
+    return 2;
+  }
+
+  const std::string clang_identity = ReadCommand("clang --version 2>&1");
+  const std::string clang_version = FirstLine(clang_identity);
+  if (clang_version.empty())
+  {
+    std::cerr << "clang is unavailable, and pgo-run requires it\n";
+    return 1;
+  }
+  const fs::path clang_path = ResolveExecutable("clang");
+
+  moderngekko::pgo::LlvmProfdataSources sources;
+  sources.explicit_path = pgo_options.llvm_profdata;
+  if (const char* from_environment = std::getenv("LLVM_PROFDATA"))
+    sources.environment_path = from_environment;
+  sources.clang_path = clang_path;
+  sources.print_prog_name = FirstLine(ReadCommand("clang --print-prog-name=llvm-profdata"));
+#if defined(__APPLE__)
+  sources.xcrun_path = FirstLine(ReadCommand("xcrun --find llvm-profdata 2>/dev/null"));
+#endif
+
+  fs::path llvm_profdata;
+  std::string llvm_profdata_version;
+  for (const fs::path& candidate : moderngekko::pgo::LlvmProfdataCandidates(sources))
+  {
+    // A candidate that does not exist still produces output -- the shell's own
+    // "not found" -- so a nonempty result is not proof. Only a version banner
+    // LLVM itself printed is.
+    const std::string probe = ReadCommand(Quote(candidate) + " --version 2>&1");
+    const std::string banner = LineContaining(probe, "LLVM version");
+    if (banner.empty())
+      continue;
+    llvm_profdata = candidate;
+    llvm_profdata_version = banner;
+    break;
+  }
+  if (llvm_profdata.empty())
+  {
+    std::cerr << "could not find a usable llvm-profdata.\n"
+                 "Pass --llvm-profdata <path>, set LLVM_PROFDATA, or put it on PATH.\n";
+    return 1;
+  }
+
+  const auto clang_major = moderngekko::pgo::ParseLlvmMajorVersion(clang_identity);
+  const auto profdata_major = moderngekko::pgo::ParseLlvmMajorVersion(llvm_profdata_version);
+  // Only a version that both tools reported and that disagrees is refused. An
+  // unparseable banner means the check does not apply, not that it failed.
+  if (clang_major && profdata_major && *clang_major != *profdata_major)
+  {
+    std::cerr << "llvm-profdata is LLVM " << *profdata_major << " but clang is LLVM "
+              << *clang_major << ".\n"
+              << "  clang:         " << clang_version << '\n'
+              << "  llvm-profdata: " << llvm_profdata_version << " (" << llvm_profdata << ")\n"
+              << "The profile formats are not guaranteed compatible across major versions.\n"
+                 "Pass --llvm-profdata with the matching binary.\n";
+    return 1;
+  }
+
+  if (options.output.empty())
+    options.output = DefaultOutput();
+  const moderngekko::pgo::Workspace workspace =
+      moderngekko::pgo::DeriveWorkspace(pgo_options.profile_dir, options.output, game.disc_id);
+
+  std::error_code ec;
+  // A .profraw left by an earlier run describes an earlier module. Merged in,
+  // it trains this one on code that may no longer exist, and the result still
+  // looks like a successful run -- so the raw directory starts empty every
+  // time rather than being appended to.
+  fs::remove_all(workspace.raw, ec);
+  fs::create_directories(workspace.raw, ec);
+  if (ec)
+  {
+    std::cerr << "could not prepare " << workspace.raw << ": " << ec.message() << '\n';
+    return 1;
+  }
+  fs::create_directories(workspace.generate_modules, ec);
+
+  std::cout << "PGO workspace: " << workspace.root << "\n"
+            << "clang:         " << clang_version << "\n"
+            << "llvm-profdata: " << llvm_profdata_version << " (" << llvm_profdata << ")\n";
+
+  std::cout << "\n[1/6] Building the instrumented module\n";
+  BuildOptions generate_options = options;
+  // A private cache root. The generation build must not be able to write the
+  // real active-module.txt, or a failure after this point leaves the user
+  // pointed at an instrumented module.
+  generate_options.output = workspace.generate_modules;
+  generate_options.pgo.mode = moderngekko::pgo::PgoMode::Generate;
+  const auto instrumented = Build(argv0, root, generate_options);
+  if (!instrumented)
+    return PgoFailure("instrumented module build", workspace);
+
+  std::cout << "\n[2/6] PGO training has started.\n"
+               "Exercise representative gameplay, demanding scenes, menus, and transitions.\n"
+               "Close the game normally when training is complete.\n\n";
+  {
+    ScopedEnvironment training_environment;
+    // %p is the training process's pid. Without it a second process -- or a
+    // relaunch inside one session -- overwrites the first one's profile
+    // instead of adding to it.
+    training_environment.Set(
+        "LLVM_PROFILE_FILE",
+        moderngekko::pgo::PathText(workspace.raw / (game.disc_id + "-%p.profraw")));
+    std::string run = Quote(SiblingExecutable(argv0, "moderngekko-run")) + " --game " +
+                      Quote(root) + " --module " + Quote(*instrumented);
+    for (const std::string& arg : options.runner_arguments)
+      run += " " + Quote(arg);
+    if (!RunCommand(run))
+    {
+      std::cerr << "\nthe training run exited with a failure status.\n"
+                   "The profiling runtime flushes on a normal shutdown, so a crashed or "
+                   "killed run has not written a usable profile.\n";
+      return PgoFailure("training run", workspace);
+    }
+  }
+
+  std::cout << "\n[3/6] Collecting raw profiles\n";
+  const std::vector<fs::path> raw_profiles =
+      moderngekko::pgo::DiscoverRawProfiles(workspace.raw);
+  std::uintmax_t raw_bytes = 0;
+  std::size_t nonempty = 0;
+  for (const fs::path& profile : raw_profiles)
+  {
+    const std::uintmax_t size = fs::file_size(profile, ec);
+    if (ec)
+      continue;
+    raw_bytes += size;
+    if (size > 0)
+      ++nonempty;
+  }
+  if (nonempty == 0)
+  {
+    std::cerr << "no nonempty .profraw was written to " << workspace.raw << ".\n"
+              << "The instrumented module did not flush a profile. Close the game through "
+                 "its own quit path rather than killing it.\n";
+    return PgoFailure("raw-profile discovery", workspace);
+  }
+
+  std::cout << "\n[4/6] Merging profiles\n";
+  std::string merge =
+      Quote(llvm_profdata) + " merge -output=" + Quote(workspace.merged_profile);
+  for (const fs::path& profile : raw_profiles)
+    merge += " " + Quote(profile);
+  if (!RunCommand(merge))
+    return PgoFailure("profile merge", workspace);
+  const std::uintmax_t merged_size = fs::file_size(workspace.merged_profile, ec);
+  if (ec || merged_size == 0)
+  {
+    std::cerr << "llvm-profdata reported success but produced no usable "
+              << workspace.merged_profile << '\n';
+    return PgoFailure("profile merge", workspace);
+  }
+
+  std::cout << "\n[5/6] Validating the merged profile\n";
+  const std::string shown =
+      ReadCommand(Quote(llvm_profdata) + " show " + Quote(workspace.merged_profile) + " 2>&1");
+  const moderngekko::pgo::ProfdataSummary summary =
+      moderngekko::pgo::ParseProfdataSummary(shown);
+  if (!summary)
+  {
+    std::cerr << summary.error << "\nllvm-profdata show said:\n" << shown << '\n';
+    return PgoFailure("profile validation", workspace);
+  }
+  std::cout << "Raw profiles:              " << raw_profiles.size() << '\n'
+            << "Total raw-profile bytes:   " << raw_bytes << '\n'
+            << "Total functions:           " << summary.total_functions << '\n'
+            << "Maximum function count:    " << summary.maximum_function_count << '\n'
+            << "Merged profile:            " << workspace.merged_profile << '\n';
+
+  const auto profile_hash = moderngekko::HashFileSha256(workspace.merged_profile);
+  if (!profile_hash)
+    return PgoFailure("profile validation", workspace);
+
+  std::cout << "\n[6/6] Building the PGO module\n";
+  BuildOptions use_options = options;
+  use_options.pgo.mode = moderngekko::pgo::PgoMode::Use;
+  // Absolute: this path is handed to a compiler that runs in the module build
+  // directory, not in the caller's working directory.
+  use_options.pgo.merged_profile = fs::absolute(workspace.merged_profile, ec);
+  if (ec)
+    use_options.pgo.merged_profile = workspace.merged_profile;
+  use_options.pgo.merged_profile_sha256 = *profile_hash;
+  use_options.pgo.reject_stale_profile = true;
+  use_options.pgo_facts.backend = options.backend;
+  use_options.pgo_facts.clang_version = clang_version;
+  use_options.pgo_facts.llvm_profdata_version = llvm_profdata_version;
+  use_options.pgo_facts.raw_profile_count = raw_profiles.size();
+  use_options.pgo_facts.total_functions = summary.total_functions;
+  use_options.pgo_facts.maximum_function_count = summary.maximum_function_count;
+  const auto module = Build(argv0, root, use_options);
+  if (!module)
+    return PgoFailure("PGO module build", workspace);
+
+  const auto module_hash = moderngekko::HashFileSha256(*module);
+  if (!module_hash)
+  {
+    std::cerr << "the PGO module is missing after a successful build: " << *module << '\n';
+    return PgoFailure("final module validation", workspace);
+  }
+
+  {
+    std::ofstream manifest(workspace.manifest);
+    manifest << "disc_id=" << game.disc_id << '\n'
+             << "dol_sha256=" << game.dol_sha256 << '\n'
+             << "module_path=" << moderngekko::pgo::PathText(*module) << '\n'
+             << "module_sha256=" << *module_hash << '\n'
+             << moderngekko::pgo::FormatPgoManifest(use_options.pgo, use_options.pgo_facts);
+  }
+
+  // Only now, with a published module and a written manifest, is it safe to
+  // drop the bulky intermediates. The merged profile and this manifest stay
+  // either way: they are what a later run, or a bug report, needs.
+  if (!pgo_options.keep_work)
+  {
+    fs::remove_all(workspace.raw, ec);
+    fs::remove_all(workspace.generate_modules, ec);
+  }
+
+  const fs::path active = options.output / game.disc_id / "active-module.txt";
+  std::cout << "\nPGO build complete\n"
+            << "Game:                  " << game.game_name << '\n'
+            << "Disc ID:               " << game.disc_id << '\n'
+            << "Backend:               " << options.backend << '\n'
+            << "Training run:          completed normally\n"
+            << "Raw profiles:          " << raw_profiles.size() << '\n'
+            << "Merged profile:        " << workspace.merged_profile << '\n'
+            << "Merged profile SHA256: " << *profile_hash << '\n'
+            << "Final module:          " << *module << '\n'
+            << "Final module SHA256:   " << *module_hash << '\n'
+            << "Active module updated: yes (" << active << ")\n"
+            << "PGO manifest:          " << workspace.manifest << '\n';
+  if (pgo_options.keep_work)
+    std::cout << "Work files kept:       " << workspace.root << '\n';
+  return 0;
+}
+
 void Usage()
 {
   std::cerr << "usage: moderngekko-port inspect <game-root>\n"
                "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--opt-level 0-3] [--output path]\n"
-               "       moderngekko-port run <game-root> [build options] [-- runner options]\n";
+               "       moderngekko-port run <game-root> [build options] [-- runner options]\n"
+               "       moderngekko-port pgo-run <game-root> [--backend c|llvm] [--toolchain auto|clang] [--opt-level 0-3]\n"
+               "               [--output path] [--profile-dir path] [--llvm-profdata path] [--keep-work]\n"
+               "               [-- runner options]\n";
 }
 }  // namespace
 
 int main(int argc, char** argv)
 {
-  if (argc < 3)
+  moderngekko::port::CommandLine parsed =
+      moderngekko::port::ParseCommandLine(argc, argv, DEFAULT_BACKEND);
+  if (parsed.usage)
   {
     Usage();
     return 2;
   }
-  const std::string command = argv[1];
-  const fs::path root = argv[2];
-  BuildOptions options;
-  bool runner_args = false;
-  for (int i = 3; i < argc; ++i)
+  if (!parsed)
   {
-    const std::string arg = argv[i];
-    if (runner_args)
-      options.runner_arguments.push_back(arg);
-    else if (arg == "--")
-      runner_args = true;
-    else if (arg == "--toolchain" && i + 1 < argc)
-      options.toolchain = argv[++i];
-    else if (arg == "--backend" && i + 1 < argc)
-      options.backend = argv[++i];
-    else if (arg == "--opt-level" && i + 1 < argc)
-      options.opt_level = argv[++i];
-    else if (arg == "--output" && i + 1 < argc)
-      options.output = argv[++i];
-    else if (command == "run")
-      options.runner_arguments.push_back(arg);
-    else
-    {
-      std::cerr << "unknown or incomplete option: " << arg << '\n';
-      return 2;
-    }
+    std::cerr << parsed.error << '\n';
+    return 2;
   }
+  const std::string& command = parsed.command;
+  const fs::path& root = parsed.root;
+  BuildOptions options = std::move(parsed.build);
   if (options.output.empty())
     options.output = DefaultOutput();
-  if (options.backend != "c" && options.backend != "llvm")
-  {
-    std::cerr << "unknown backend: " << options.backend << '\n';
-    return 2;
-  }
-  if (!options.opt_level.empty() &&
-      (options.opt_level.size() != 1 || options.opt_level[0] < '0' || options.opt_level[0] > '3'))
-  {
-    std::cerr << "opt level must be 0, 1, 2, or 3: " << options.opt_level << '\n';
-    return 2;
-  }
 #if !defined(MODERNGEKKO_DOLRECOMP_LLVM)
   if (options.backend == "llvm")
   {
@@ -675,11 +1130,8 @@ int main(int argc, char** argv)
 #endif
   if (command == "inspect")
     return Inspect(root, options.output);
-  if (command != "build" && command != "run")
-  {
-    Usage();
-    return 2;
-  }
+  if (command == "pgo-run")
+    return PgoRun(argv[0], root, options, parsed.pgo_run);
   const auto module = Build(argv[0], root, options);
   if (!module)
     return 1;
