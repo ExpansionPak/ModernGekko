@@ -61,6 +61,26 @@ beside the resolved `clang`, `clang --print-prog-name=llvm-profdata`, `xcrun
 --find` on macOS, then `PATH`. A candidate is only accepted if it prints an LLVM
 version banner, and a known major-version mismatch with Clang is a hard error.
 
+**With `--backend llvm` there is a third LLVM to match.** The merged profile is
+written by `llvm-profdata` and read back by the LLVM that DolRecomp itself is
+linked against, and those are separate installations. The pinned recompiler
+builds against **LLVM 19 or 20**, so a distribution whose default `clang` is
+newer will merge a profile the recompiler cannot parse, and the build fails with
+`unsupported instrumentation profile format version` repeated once per chunk.
+
+`pgo-run` cannot check this for you — DolRecomp does not report its own LLVM
+version — so put the matching release first on `PATH`:
+
+```bash
+export PATH=/usr/lib/llvm-20/bin:$PATH
+```
+
+Overriding only `--llvm-profdata` is not enough: the module's C sources are
+compiled by whichever `clang` is on `PATH`, and that clang supplies the
+profiling runtime that writes the raw profile. Check what the recompiler links
+against with `ldd $(which dolrecomp) | grep -i llvm`. The `--backend c` path has
+no recompiler-side profile reader and is unaffected.
+
 ### Examples
 
 Interactive, LLVM backend:

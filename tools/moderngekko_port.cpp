@@ -1108,7 +1108,34 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
   use_options.pgo_facts.maximum_function_count = summary.maximum_function_count;
   const auto module = Build(argv0, root, use_options);
   if (!module)
+  {
+    // By far the most common way this stage fails, and the error the
+    // recompiler prints -- "unsupported instrumentation profile format
+    // version", once per chunk worker -- says nothing about which of the three
+    // LLVMs involved disagreed.
+    //
+    // The profile is written by llvm-profdata and read back by the LLVM that
+    // DolRecomp is linked against, and those are separate installations. The
+    // check above compares clang against llvm-profdata, which catches the
+    // common case but cannot see DolRecomp's, because the recompiler does not
+    // report its own LLVM version. It also fails late: DolRecomp opens the
+    // profile eagerly (so a wrong path is caught) but only parses it inside
+    // PGOInstrumentationUse, after the emit has already started.
+    if (options.backend == "llvm")
+      std::cerr << "\nIf the recompiler reported \"unsupported instrumentation profile format "
+                   "version\",\nthe merged profile is newer than the LLVM DolRecomp is linked "
+                   "against.\n"
+                << "  llvm-profdata used here: " << llvm_profdata_version << '\n'
+                << "  clang used here:         " << clang_version << '\n'
+                << "The pinned recompiler builds against LLVM 19 or 20. Put that release's bin\n"
+                   "directory first on PATH so clang, its profiling runtime and llvm-profdata\n"
+                   "all match it, delete this workspace, and re-run. Overriding only\n"
+                   "--llvm-profdata is not enough: the module's C sources are compiled by\n"
+                   "whichever clang is on PATH, and that clang supplies the profiling runtime.\n"
+                << "Check what the recompiler links with: ldd "
+                << Text(SiblingExecutable(argv0, "dolrecomp")) << " | grep -i llvm\n";
     return PgoFailure("PGO module build", workspace);
+  }
 
   const auto module_hash = moderngekko::HashFileSha256(*module);
   if (!module_hash)
