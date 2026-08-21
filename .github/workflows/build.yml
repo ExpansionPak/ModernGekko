@@ -44,6 +44,8 @@ jobs:
             moderngekko_dol_patch_test
             moderngekko_frontend_config_test
             moderngekko_frontend_config_gamecube_test
+            moderngekko_pgo_support_test
+            moderngekko_port_command_line_test
           "
           for target in $targets; do
             cmake --build build --config Release --target "$target"
@@ -57,7 +59,7 @@ jobs:
         # skipping it.
         run: >
           ctest --output-on-failure --build-config Release
-          -R "moderngekko\.(launcher_savestates|dol_patch|frontend_config)"
+          -R "moderngekko\.(launcher_savestates|dol_patch|frontend_config|pgo_support|port_command_line)"
 
   # The whole thing, including everything that links Dolphin. This is the job
   # that catches a runtime or launcher break, and the one that costs real time.

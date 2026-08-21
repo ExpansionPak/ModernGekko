@@ -590,8 +590,12 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     endif()
     add_dependencies(moderngekko-launcher moderngekko-run)
 
-    add_executable(moderngekko-port tools/moderngekko_port.cpp)
+    add_executable(moderngekko-port
+        tools/moderngekko_port.cpp
+        tools/pgo_support.cpp)
     target_link_libraries(moderngekko-port PRIVATE ModernGekko::Runtime)
+    target_include_directories(moderngekko-port PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     target_compile_definitions(moderngekko-port PRIVATE
         MODERNGEKKO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     if(DOLRECOMP_ENABLE_LLVM)
@@ -668,6 +672,27 @@ if(BUILD_TESTING)
     target_compile_features(moderngekko_launcher_savestates_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.launcher_savestates
              COMMAND moderngekko_launcher_savestates_test)
+
+    # The PGO helpers deliberately depend on nothing but the standard library
+    # and the header-only digest, so this runs in the fast cross-platform job
+    # rather than waiting on a Dolphin link.
+    add_executable(moderngekko_pgo_support_test
+        tests/pgo_support_test.cpp
+        tools/pgo_support.cpp)
+    target_include_directories(moderngekko_pgo_support_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_compile_features(moderngekko_pgo_support_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.pgo_support COMMAND moderngekko_pgo_support_test)
+
+    add_executable(moderngekko_port_command_line_test
+        tests/port_command_line_test.cpp
+        tools/pgo_support.cpp)
+    target_include_directories(moderngekko_port_command_line_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_features(moderngekko_port_command_line_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.port_command_line
+             COMMAND moderngekko_port_command_line_test)
 
     add_executable(moderngekko_frontend_config_gamecube_test
         tests/frontend_config_test.cpp
