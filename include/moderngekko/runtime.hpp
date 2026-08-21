@@ -44,6 +44,11 @@ struct InputSettings
   bool background_input = false;
 };
 
+struct AutomationSettings
+{
+  std::filesystem::path directory;
+};
+
 enum class WindowSystem
 {
   Default,
@@ -68,6 +73,7 @@ struct RuntimeConfig
   std::optional<std::string> window_title;
   // Boot straight into a savestate instead of from the title screen.
   std::optional<std::filesystem::path> load_state_path;
+  AutomationSettings automation;
 };
 
 enum class RuntimeErrorCode

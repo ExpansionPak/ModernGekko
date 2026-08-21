@@ -122,20 +122,16 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(LINUX_LOCAL_DEV ON CACHE BOOL "" FORCE)
     set(DISTRIBUTOR "ModernGekko" CACHE STRING "" FORCE)
     add_subdirectory(vendor/dolphin EXCLUDE_FROM_ALL)
-    target_sources(core PRIVATE
+    # cpu_exception.c is C, but Dolphin's `core` forces its shared C++
+    # precompiled header (Source/PCH: /Yupch.h /FIpch.h) onto every source in
+    # the target, which MSVC rejects for a C translation unit (C1853), and the
+    # forced include cannot be dropped per-source. It needs nothing but
+    # GXRuntime's core/cpu.h, so give it its own target and link it in.
+    add_library(moderngekko_gxruntime_core STATIC
         vendor/dolphin/GXRuntime/src/core/cpu_exception.c)
-    # `core` compiles with Dolphin's C++ precompiled header, which MSVC refuses
-    # to apply to a C translation unit (fatal error C1853). Dolphin implements
-    # its shared PCH by hand (Source/PCH: a `use_pch` interface target adding
-    # /Yupch.h /FIpch.h), not via target_precompile_headers, so CMake's
-    # SKIP_PRECOMPILE_HEADERS has no effect here -- /Y- is what turns it off,
-    # and source-level options are emitted after the interface ones.
-    if(MSVC)
-        set_source_files_properties(
-            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/src/core/cpu_exception.c"
-            TARGET_DIRECTORY core
-            PROPERTIES COMPILE_OPTIONS "/Y-")
-    endif()
+    target_include_directories(moderngekko_gxruntime_core PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+    target_link_libraries(core PRIVATE moderngekko_gxruntime_core)
     target_include_directories(core PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
     if(MODERNGEKKO_FRONTEND_SDK)
@@ -254,9 +250,13 @@ target_link_libraries(moderngekko PUBLIC ModernGekko::ABI PRIVATE fmt::fmt)
 if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     target_sources(moderngekko PRIVATE
         src/runtime/dolphin_runtime.cpp
+        # Benchmark automation protocol (status.txt + commands/), used by
+        # dolphin_runtime.cpp; the header lives beside it under tools/.
+        tools/automation_protocol.cpp
         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
     )
+    target_include_directories(moderngekko PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     if(WIN32)
         target_sources(moderngekko PRIVATE
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformWin32.cpp)
@@ -422,6 +422,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     endif()
     add_executable(moderngekko-run
         tools/moderngekko_run.cpp
+        tools/automation_protocol.cpp
         tools/netplay_compatibility.cpp
         tools/netplay_session.cpp
         tools/frontend_config.cpp
