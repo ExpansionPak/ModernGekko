@@ -314,13 +314,13 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
     recomp_source = StaticRecompModuleSource::Attached(
         reinterpret_cast<const StaticRecompModuleDesc *>(
             impl->config.module.descriptor));
-  if (!impl->mods->Empty()) {
-    recomp_source.host_call = &ModManager::HostCall;
-    recomp_source.host_call_contains = &ModManager::HostCallContains;
-    recomp_source.host_call_range_contains =
-        &ModManager::HostCallRangeContains;
-    recomp_source.host_call_user = impl->mods.get();
-  }
+  recomp_source.host_call = &ModManager::HostCall;
+  recomp_source.host_call_contains = &ModManager::HostCallContains;
+  recomp_source.host_call_range_contains =
+      &ModManager::HostCallRangeContains;
+  recomp_source.host_call_active = &ModManager::HostCallActive;
+  recomp_source.host_call_generation = &ModManager::HostCallGeneration;
+  recomp_source.host_call_user = impl->mods.get();
   jit.SetStaticRecompModuleSource(std::move(recomp_source));
 
   s_runtime_active = true;

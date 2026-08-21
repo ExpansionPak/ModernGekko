@@ -70,12 +70,16 @@ public:
   const std::vector<LoadedModInfo> &GetLoadedMods() const;
   bool HandlesAddress(std::uint32_t address) const;
   bool HandlesRange(std::uint32_t start, std::uint32_t end) const;
+  bool HasGuestInterception() const;
+  std::uint64_t InterceptionGeneration() const;
   bool Empty() const;
 
   static bool HostCall(CPUState *state, std::uint32_t address, void *user_data);
   static bool HostCallContains(std::uint32_t address, void *user_data);
   static bool HostCallRangeContains(std::uint32_t start, std::uint32_t end,
                                     void *user_data);
+  static bool HostCallActive(void *user_data);
+  static std::uint64_t HostCallGeneration(void *user_data);
 
 private:
   struct Impl;

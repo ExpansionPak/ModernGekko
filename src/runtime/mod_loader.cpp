@@ -131,6 +131,7 @@ struct ModManager::Impl {
       callbacks;
   std::vector<ModernGekkoModFunction *> import_slots;
   std::vector<PendingReturn> pending_returns;
+  std::uint64_t interception_generation = 1;
   bool runtime_started = false;
   ModernGekkoModHostApi host_api{};
 
@@ -467,6 +468,7 @@ ModLoadReport ModManager::Load(const std::vector<ModSource> &sources,
       desc->on_load(&m_impl->host_api);
     mod->loaded = true;
   }
+  ++m_impl->interception_generation;
   report.loaded = m_impl->loaded;
   return report;
 }
@@ -555,6 +557,7 @@ void ModManager::Unload() {
   m_impl->import_slots.clear();
   m_impl->mods.clear();
   m_impl->runtime_started = false;
+  ++m_impl->interception_generation;
 }
 
 bool ModManager::Dispatch(CPUState *state, std::uint32_t address) {
@@ -569,6 +572,7 @@ bool ModManager::Dispatch(CPUState *state, std::uint32_t address) {
       m_impl->pending_returns.back().stack_pointer == state->gpr[1]) {
     auto pending = std::move(m_impl->pending_returns.back());
     m_impl->pending_returns.pop_back();
+    ++m_impl->interception_generation;
     for (auto it = pending.functions.rbegin(); it != pending.functions.rend();
          ++it) {
       const CPUState saved = *state;
@@ -588,6 +592,7 @@ bool ModManager::Dispatch(CPUState *state, std::uint32_t address) {
         m_impl->pending_returns.erase(m_impl->pending_returns.begin());
       m_impl->pending_returns.push_back(
           {state->lr, state->gpr[1], hooks->second.returning});
+      ++m_impl->interception_generation;
     }
   }
   const auto patch = m_impl->patches.find(address);
@@ -648,6 +653,15 @@ bool ModManager::HandlesRange(std::uint32_t start, std::uint32_t end) const {
       });
 }
 
+bool ModManager::HasGuestInterception() const {
+  return !m_impl->patches.empty() || !m_impl->hooks.empty() ||
+         !m_impl->pending_returns.empty();
+}
+
+std::uint64_t ModManager::InterceptionGeneration() const {
+  return m_impl->interception_generation;
+}
+
 bool ModManager::Empty() const { return m_impl->mods.empty(); }
 
 bool ModManager::HostCall(CPUState *state, std::uint32_t address,
@@ -665,5 +679,16 @@ bool ModManager::HostCallRangeContains(std::uint32_t start, std::uint32_t end,
                                        void *user_data) {
   return user_data &&
          static_cast<ModManager *>(user_data)->HandlesRange(start, end);
+}
+
+bool ModManager::HostCallActive(void *user_data) {
+  return user_data &&
+         static_cast<ModManager *>(user_data)->HasGuestInterception();
+}
+
+std::uint64_t ModManager::HostCallGeneration(void *user_data) {
+  if (!user_data)
+    return 0;
+  return static_cast<ModManager *>(user_data)->InterceptionGeneration();
 }
 }

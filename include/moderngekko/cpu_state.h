@@ -8,7 +8,7 @@
 extern "C" {
 #endif
 
-#define MODERNGEKKO_CPU_ABI_VERSION 3u
+#define MODERNGEKKO_CPU_ABI_VERSION 4u
 #define GXRUNTIME_CPU_ABI_VERSION MODERNGEKKO_CPU_ABI_VERSION
 
 typedef struct CPUState CPUState;
@@ -72,6 +72,7 @@ struct CPUState
     uint32_t ram_size;
     PPCExternalPointer external_pointer;
     int64_t downcount;
+    int64_t cycle_budget;
     uint8_t* exram;
     uint32_t exram_size;
     PPCSPRRead spr_read;
