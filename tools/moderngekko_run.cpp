@@ -189,6 +189,8 @@ int RunMain(int argc, char **argv) {
       config.window_system = moderngekko::WindowSystem::X11;
     else if (arg == "--wayland")
       config.window_system = moderngekko::WindowSystem::Wayland;
+    else if (arg == "--mute")
+      config.audio.mute = true;
     else if (arg == "--automation-dir")
       config.automation.directory = value("--automation-dir");
     else if (arg == "--headless")

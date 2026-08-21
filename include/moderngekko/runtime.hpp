@@ -37,6 +37,10 @@ struct GraphicsSettings
 struct AudioSettings
 {
   std::string backend;
+  // Silence output without touching the audio backend or the DSP engine:
+  // savestates record DSP state, so switching to a null backend makes them
+  // refuse to load ("State is incompatible with current DSP engine").
+  bool mute = false;
 };
 
 struct InputSettings

@@ -187,11 +187,18 @@ void MarkAutomationCommand(RuntimeAutomationState& state, std::string command_na
 
 void ClearAutomationPad(int port)
 {
+  // Pin every control to neutral rather than clearing the override.
+  // ClearControlState REMOVES the override, and Dolphin then falls back to the
+  // real input device -- so the host keyboard reaches the game again. Since
+  // ApplyAutomationPad() calls this first, every pad command silently reopened
+  // host input mid-run, which is how a stray keypress (Enter = START = pause)
+  // wrecked benchmark runs. A neutral override is identical for the guest and
+  // keeps automation authoritative for as long as it is registered.
   for (int control = static_cast<int>(ciface::Touch::FIRST_GC_CONTROL);
        control <= static_cast<int>(ciface::Touch::LAST_GC_CONTROL); ++control)
   {
-    ciface::Touch::ClearControlState(port,
-                                     static_cast<ciface::Touch::ControlID>(control));
+    ciface::Touch::SetControlState(
+        port, static_cast<ciface::Touch::ControlID>(control), 0.0);
   }
 }
 
@@ -641,7 +648,23 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   EnsureAutomationDirectories(impl->config.automation.directory);
   if (!impl->config.automation.directory.empty()) {
     for (int port = 0; port < 4; ++port)
+    {
       ciface::Touch::RegisterGameCubeInputOverrider(port);
+      // The overrider returns nullopt for any control automation is not
+      // actively driving, and Dolphin then falls back to the REAL device --
+      // so a stray keypress on the host still reaches the game. (Enter is
+      // Dolphin's default mapping for START, which opens the pause menu and
+      // silently wrecks a benchmark run.) Pin every control to neutral so
+      // nothing falls through; automation pad commands override on top.
+      for (int id = ciface::Touch::FIRST_GC_CONTROL; id <= ciface::Touch::LAST_GC_CONTROL; ++id)
+        ciface::Touch::SetControlState(port, static_cast<ciface::Touch::ControlID>(id), 0.0);
+      // Wii titles read the Wiimote/Nunchuk/Classic controls, which the
+      // GameCube overrider does not cover -- without this a Wii run still
+      // takes host input.
+      ciface::Touch::RegisterWiiInputOverrider(port);
+      for (int id = ciface::Touch::FIRST_WII_CONTROL; id <= ciface::Touch::LAST_WII_CONTROL; ++id)
+        ciface::Touch::SetControlState(port, static_cast<ciface::Touch::ControlID>(id), 0.0);
+    }
     impl->automation_registered = true;
   }
   impl->platform->SetTitle(impl->title);
@@ -675,6 +698,8 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
         preferred != preferred_backends.end() ? *preferred : BACKEND_NULLSOUND;
   }
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, impl->config.audio.backend);
+  if (impl->config.audio.mute)
+    Config::SetBase(Config::MAIN_AUDIO_VOLUME, 0);
   Config::SetBase(Config::MAIN_INPUT_BACKGROUND_INPUT,
                   impl->config.input.background_input);
 
@@ -716,7 +741,10 @@ Runtime::~Runtime() {
   m_impl->present_hook = {};
   if (m_impl->automation_registered) {
     for (int port = 0; port < 4; ++port)
+    {
       ciface::Touch::UnregisterGameCubeInputOverrider(port);
+      ciface::Touch::UnregisterWiiInputOverrider(port);
+    }
     m_impl->automation_registered = false;
   }
   m_impl->state_hook = {};
