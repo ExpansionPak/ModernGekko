@@ -124,6 +124,18 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     add_subdirectory(vendor/dolphin EXCLUDE_FROM_ALL)
     target_sources(core PRIVATE
         vendor/dolphin/GXRuntime/src/core/cpu_exception.c)
+    # `core` compiles with Dolphin's C++ precompiled header, which MSVC refuses
+    # to apply to a C translation unit (fatal error C1853). Dolphin implements
+    # its shared PCH by hand (Source/PCH: a `use_pch` interface target adding
+    # /Yupch.h /FIpch.h), not via target_precompile_headers, so CMake's
+    # SKIP_PRECOMPILE_HEADERS has no effect here -- /Y- is what turns it off,
+    # and source-level options are emitted after the interface ones.
+    if(MSVC)
+        set_source_files_properties(
+            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/src/core/cpu_exception.c"
+            TARGET_DIRECTORY core
+            PROPERTIES COMPILE_OPTIONS "/Y-")
+    endif()
     target_include_directories(core PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
     if(MODERNGEKKO_FRONTEND_SDK)
@@ -219,6 +231,11 @@ target_compile_features(moderngekko_dolphin_video PUBLIC cxx_std_23)
 if(MSVC)
     target_compile_options(moderngekko_dolphin_video PUBLIC /Zc:preprocessor)
     target_compile_definitions(moderngekko_dolphin_video PUBLIC UNICODE _UNICODE)
+    # Dolphin's Common/StringUtil.h picks its TStrToUTF8/UTF8ToTStr overloads on
+    # _UNICODE; the non-_UNICODE branch returns a string_view as a std::string
+    # and does not compile. Dolphin's own targets define these, so every target
+    # of ours that includes its headers must too.
+    target_compile_definitions(moderngekko PUBLIC UNICODE _UNICODE)
 endif()
 target_include_directories(moderngekko_dolphin_video
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
