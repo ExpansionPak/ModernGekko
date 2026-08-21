@@ -37,11 +37,20 @@ struct GraphicsSettings
 struct AudioSettings
 {
   std::string backend;
+  // Silence output without touching the audio backend or the DSP engine:
+  // savestates record DSP state, so switching to a null backend makes them
+  // refuse to load ("State is incompatible with current DSP engine").
+  bool mute = false;
 };
 
 struct InputSettings
 {
   bool background_input = false;
+};
+
+struct AutomationSettings
+{
+  std::filesystem::path directory;
 };
 
 enum class WindowSystem
@@ -68,6 +77,7 @@ struct RuntimeConfig
   std::optional<std::string> window_title;
   // Boot straight into a savestate instead of from the title screen.
   std::optional<std::filesystem::path> load_state_path;
+  AutomationSettings automation;
 };
 
 enum class RuntimeErrorCode

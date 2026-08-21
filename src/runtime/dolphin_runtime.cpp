@@ -19,6 +19,18 @@
 #include "DolphinNoGUI/Platform.h"
 #include "UICommon/UICommon.h"
 #include "VideoCommon/PerformanceMetrics.h"
+#include "VideoCommon/VideoEvents.h"
+#include "VideoCommon/FrameDumper.h"
+#include "Core/HW/Memmap.h"
+#include "Core/State.h"
+#include "InputCommon/ControllerInterface/Touch/InputOverrider.h"
+#include "automation_protocol.hpp"
+
+#include <chrono>
+#include <fstream>
+#include <mutex>
+#include <thread>
+#include <stop_token>
 #include "VideoCommon/VideoConfig.h"
 #include "dolphin_runtime_internal.hpp"
 #include "moderngekko/cpu_state.h"
@@ -133,6 +145,362 @@ Host_CreateGBAHost(std::weak_ptr<HW::GBA::Core>) {
 }
 
 namespace moderngekko {
+// ---- Automation protocol -----------------------------------------------
+// Ported from the benchmark instrumentation that lived only in the Skyward
+// Sword ModernGekko checkout. The harness drives runs through it: commands
+// are dropped as files under <automation-dir>/commands, and status.txt is
+// rewritten every 200ms with fps/speed/frame counts.
+namespace {
+struct RuntimeAutomationState
+{
+  mutable std::mutex mutex;
+  std::atomic<std::uint64_t> frame_count{0};
+  std::atomic<std::uint64_t> present_count{0};
+  std::uint64_t processed_commands = 0;
+  std::string last_command;
+  std::string last_error;
+};
+
+void EnsureAutomationDirectories(const std::filesystem::path& root)
+{
+  if (root.empty())
+    return;
+  std::error_code ec;
+  std::filesystem::create_directories(root / "commands", ec);
+  std::filesystem::create_directories(root / "processed", ec);
+  std::filesystem::create_directories(root / "failed", ec);
+}
+
+void SetAutomationError(RuntimeAutomationState& state, std::string message)
+{
+  std::lock_guard lock(state.mutex);
+  state.last_error = std::move(message);
+}
+
+void MarkAutomationCommand(RuntimeAutomationState& state, std::string command_name)
+{
+  std::lock_guard lock(state.mutex);
+  ++state.processed_commands;
+  state.last_command = std::move(command_name);
+  state.last_error.clear();
+}
+
+void ClearAutomationPad(int port)
+{
+  // Pin every control to neutral rather than clearing the override.
+  // ClearControlState REMOVES the override, and Dolphin then falls back to the
+  // real input device -- so the host keyboard reaches the game again. Since
+  // ApplyAutomationPad() calls this first, every pad command silently reopened
+  // host input mid-run, which is how a stray keypress (Enter = START = pause)
+  // wrecked benchmark runs. A neutral override is identical for the guest and
+  // keeps automation authoritative for as long as it is registered.
+  for (int control = static_cast<int>(ciface::Touch::FIRST_GC_CONTROL);
+       control <= static_cast<int>(ciface::Touch::LAST_GC_CONTROL); ++control)
+  {
+    ciface::Touch::SetControlState(
+        port, static_cast<ciface::Touch::ControlID>(control), 0.0);
+  }
+}
+
+void ApplyAutomationPad(const automation::PadState& pad)
+{
+  ClearAutomationPad(pad.port);
+  for (std::size_t index = 0; index < pad.controls.size(); ++index)
+  {
+    ciface::Touch::SetControlState(
+        pad.port,
+        static_cast<ciface::Touch::ControlID>(
+            static_cast<int>(ciface::Touch::FIRST_GC_CONTROL) +
+            static_cast<int>(index)),
+        pad.controls[index]);
+  }
+}
+
+std::filesystem::path NormalizeScreenshotPath(const std::filesystem::path& path)
+{
+  if (!path.has_extension())
+    return path.string() + ".png";
+  return path;
+}
+
+void SaveAutomationScreenshot(const std::filesystem::path& path)
+{
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  const Core::CPUThreadGuard guard(Core::System::GetInstance());
+  if (g_frame_dumper)
+    g_frame_dumper->SaveScreenshot(path.string());
+}
+
+std::optional<RuntimeError> ReadAutomationMemory(const std::filesystem::path& path, u32 address,
+                                                 u32 size)
+{
+  auto& system = Core::System::GetInstance();
+  const Core::CPUThreadGuard guard(system);
+  const u8* source = system.GetMemory().GetPointerForRange(address, size);
+  if (!source)
+  {
+    return RuntimeError{RuntimeErrorCode::InvalidState,
+                        fmt::format("guest range {:#010x}+{} is not readable", address, size)};
+  }
+
+  std::error_code ec;
+  std::filesystem::create_directories(path.parent_path(), ec);
+  if (ec)
+  {
+    return RuntimeError{RuntimeErrorCode::InitializationFailed,
+                        "could not create memory output directory: " + ec.message()};
+  }
+
+  std::ofstream output(path, std::ios::binary | std::ios::trunc);
+  if (!output)
+  {
+    return RuntimeError{RuntimeErrorCode::InitializationFailed,
+                        "could not open memory output file"};
+  }
+  output.write(reinterpret_cast<const char*>(source), size);
+  if (!output)
+  {
+    return RuntimeError{RuntimeErrorCode::InitializationFailed,
+                        "could not write memory output file"};
+  }
+  return {};
+}
+
+std::optional<RuntimeError> WriteAutomationMemory(u32 address,
+                                                  const std::vector<std::uint8_t>& data)
+{
+  auto& system = Core::System::GetInstance();
+  const Core::CPUThreadGuard guard(system);
+  if (!system.GetMemory().GetPointerForRange(address, data.size()))
+  {
+    return RuntimeError{
+        RuntimeErrorCode::InvalidState,
+        fmt::format("guest range {:#010x}+{} is not writable", address, data.size())};
+  }
+  system.GetMemory().CopyToEmu(address, data.data(), data.size());
+  return {};
+}
+
+std::optional<RuntimeError> ApplyAutomationCommand(Runtime& runtime,
+                                                   RuntimeAutomationState& state,
+                                                   const automation::Command& command,
+                                                   std::stop_token stop_token)
+{
+  auto& system = Core::System::GetInstance();
+  switch (command.type)
+  {
+  case automation::CommandType::Pad:
+    ApplyAutomationPad(command.pad);
+    break;
+  case automation::CommandType::PadFrames:
+  {
+    if (Core::GetState(system) != Core::State::Running)
+    {
+      return RuntimeError{RuntimeErrorCode::InvalidState,
+                          "pad_frames requires a running emulated core"};
+    }
+    std::uint64_t first_frame = state.frame_count.load(std::memory_order_relaxed);
+    ApplyAutomationPad(command.pad);
+    while (!stop_token.stop_requested())
+    {
+      const std::uint64_t current_frame =
+          state.frame_count.load(std::memory_order_relaxed);
+      if (current_frame < first_frame)
+        first_frame = current_frame;
+      else if (current_frame - first_frame >= command.frames)
+        break;
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    ClearAutomationPad(command.pad.port);
+    break;
+  }
+  case automation::CommandType::ClearPad:
+    ClearAutomationPad(command.pad.port);
+    break;
+  case automation::CommandType::Pause:
+    if (auto error = runtime.Pause())
+      return error;
+    break;
+  case automation::CommandType::Resume:
+    if (auto error = runtime.Resume())
+      return error;
+    break;
+  case automation::CommandType::SaveState:
+    std::filesystem::create_directories(command.path.parent_path());
+    State::SaveAs(system, command.path.string());
+    break;
+  case automation::CommandType::LoadState:
+    State::LoadAs(system, command.path.string());
+    break;
+  case automation::CommandType::Screenshot:
+    SaveAutomationScreenshot(NormalizeScreenshotPath(command.path));
+    break;
+  case automation::CommandType::ReadMemory:
+    if (auto error = ReadAutomationMemory(command.path, command.address, command.size))
+      return error;
+    break;
+  case automation::CommandType::WriteMemory:
+    if (auto error = WriteAutomationMemory(command.address, command.data))
+      return error;
+    break;
+  case automation::CommandType::Stop:
+    runtime.RequestStop();
+    break;
+  }
+  MarkAutomationCommand(state, command.source_name);
+  return {};
+}
+
+bool AutomationCommandNeedsReadyCore(automation::CommandType type)
+{
+  switch (type)
+  {
+  case automation::CommandType::Pause:
+  case automation::CommandType::Resume:
+  case automation::CommandType::SaveState:
+  case automation::CommandType::LoadState:
+  case automation::CommandType::Screenshot:
+  case automation::CommandType::ReadMemory:
+  case automation::CommandType::WriteMemory:
+  case automation::CommandType::PadFrames:
+    return true;
+  case automation::CommandType::Pad:
+  case automation::CommandType::ClearPad:
+  case automation::CommandType::Stop:
+    return false;
+  }
+  return true;
+}
+
+bool AutomationCoreIsReady()
+{
+  const auto state = Core::GetState(Core::System::GetInstance());
+  return state == Core::State::Running || state == Core::State::Paused;
+}
+
+void MoveAutomationCommand(const std::filesystem::path& source, const std::filesystem::path& root,
+                           const char* destination_directory)
+{
+  std::error_code ec;
+  const std::filesystem::path destination =
+      root / destination_directory / source.filename();
+  std::filesystem::remove(destination, ec);
+  ec.clear();
+  std::filesystem::rename(source, destination, ec);
+  if (ec)
+  {
+    ec.clear();
+    std::filesystem::copy_file(source, destination,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    if (!ec)
+      std::filesystem::remove(source, ec);
+  }
+}
+
+template <typename ImplT>
+void WriteAutomationStatus(const std::filesystem::path& root, ImplT& impl)
+{
+  automation::Status status;
+  const auto core_state = impl.booted ? Core::GetState(Core::System::GetInstance())
+                                      : Core::State::Uninitialized;
+  status.state = core_state == Core::State::Paused
+                     ? "paused"
+                     : (core_state == Core::State::Running ? "running" : "stopped");
+  status.booted = impl.booted;
+  status.title = impl.title;
+  status.game_id = impl.metadata.disc_id;
+  status.game_name = impl.metadata.game_name;
+  if (impl.booted)
+  {
+    const auto& perf = Core::System::GetInstance().GetPerfMetrics();
+    status.fps = perf.GetFPS();
+    status.vps = perf.GetVPS();
+    status.speed = perf.GetSpeed();
+  }
+  status.frame_count =
+      impl.automation_state.frame_count.load(std::memory_order_relaxed);
+  status.present_count =
+      impl.automation_state.present_count.load(std::memory_order_relaxed);
+  {
+    std::lock_guard lock(impl.automation_state.mutex);
+    status.processed_commands = impl.automation_state.processed_commands;
+    status.last_command = impl.automation_state.last_command;
+    status.last_error = impl.automation_state.last_error;
+  }
+
+  const std::filesystem::path status_path = root / "status.txt";
+  const std::filesystem::path temp_path = root / "status.tmp";
+  std::ofstream output(temp_path, std::ios::binary | std::ios::trunc);
+  output << automation::FormatStatus(status);
+  output.close();
+  std::error_code ec;
+  std::filesystem::rename(temp_path, status_path, ec);
+  if (ec)
+  {
+    ec.clear();
+    std::filesystem::copy_file(temp_path, status_path,
+                               std::filesystem::copy_options::overwrite_existing, ec);
+    std::filesystem::remove(temp_path, ec);
+  }
+}
+
+template <typename ImplT>
+void AutomationLoop(Runtime& runtime, ImplT& impl, std::stop_token stop_token)
+{
+  const std::filesystem::path root = impl.config.automation.directory;
+  if (root.empty())
+    return;
+
+  EnsureAutomationDirectories(root);
+  auto next_status_write = std::chrono::steady_clock::now();
+  while (!stop_token.stop_requested())
+  {
+
+    for (const auto& command_path : automation::ListCommandFiles(root / "commands"))
+    {
+      automation::Command command;
+      std::string error;
+      if (!automation::ParseCommandFile(command_path, &command, &error))
+      {
+        SetAutomationError(impl.automation_state,
+                           command_path.filename().string() + ": " + error);
+        MoveAutomationCommand(command_path, root, "failed");
+        continue;
+      }
+
+      if (AutomationCommandNeedsReadyCore(command.type) && !AutomationCoreIsReady())
+        break;
+
+      if (!command.path.empty())
+        command.path = automation::ResolveControlPath(root, command.path);
+
+      if (auto runtime_error =
+              ApplyAutomationCommand(runtime, impl.automation_state, command, stop_token))
+      {
+        SetAutomationError(impl.automation_state,
+                           command.source_name + ": " + runtime_error->message);
+        MoveAutomationCommand(command_path, root, "failed");
+        continue;
+      }
+
+      MoveAutomationCommand(command_path, root, "processed");
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (now >= next_status_write)
+    {
+      WriteAutomationStatus(root, impl);
+      next_status_write = now + std::chrono::milliseconds(200);
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+  }
+
+  WriteAutomationStatus(root, impl);
+}
+
+}  // namespace
+
 struct Runtime::Impl {
   RuntimeConfig config;
   GameMetadata metadata;
@@ -144,6 +512,10 @@ struct Runtime::Impl {
   bool controllers_initialized = false;
   bool booted = false;
   std::atomic<bool> running{false};
+  RuntimeAutomationState automation_state;
+  Common::EventHook present_hook;
+  bool automation_registered = false;
+  std::jthread automation_thread;
 };
 
 namespace detail {
@@ -271,6 +643,30 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   const WindowSystemInfo wsi = impl->platform->GetWindowSystemInfo();
   UICommon::InitControllers(wsi);
   impl->controllers_initialized = true;
+  // Automation drives the pad through Dolphin's input overrider, which is what
+  // lets the harness hold accelerate for the length of a measured run.
+  EnsureAutomationDirectories(impl->config.automation.directory);
+  if (!impl->config.automation.directory.empty()) {
+    for (int port = 0; port < 4; ++port)
+    {
+      ciface::Touch::RegisterGameCubeInputOverrider(port);
+      // The overrider returns nullopt for any control automation is not
+      // actively driving, and Dolphin then falls back to the REAL device --
+      // so a stray keypress on the host still reaches the game. (Enter is
+      // Dolphin's default mapping for START, which opens the pause menu and
+      // silently wrecks a benchmark run.) Pin every control to neutral so
+      // nothing falls through; automation pad commands override on top.
+      for (int id = ciface::Touch::FIRST_GC_CONTROL; id <= ciface::Touch::LAST_GC_CONTROL; ++id)
+        ciface::Touch::SetControlState(port, static_cast<ciface::Touch::ControlID>(id), 0.0);
+      // Wii titles read the Wiimote/Nunchuk/Classic controls, which the
+      // GameCube overrider does not cover -- without this a Wii run still
+      // takes host input.
+      ciface::Touch::RegisterWiiInputOverrider(port);
+      for (int id = ciface::Touch::FIRST_WII_CONTROL; id <= ciface::Touch::LAST_WII_CONTROL; ++id)
+        ciface::Touch::SetControlState(port, static_cast<ciface::Touch::ControlID>(id), 0.0);
+    }
+    impl->automation_registered = true;
+  }
   impl->platform->SetTitle(impl->title);
 
   Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::StaticRecomp);
@@ -302,6 +698,8 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
         preferred != preferred_backends.end() ? *preferred : BACKEND_NULLSOUND;
   }
   Config::SetBase(Config::MAIN_AUDIO_BACKEND, impl->config.audio.backend);
+  if (impl->config.audio.mute)
+    Config::SetBase(Config::MAIN_AUDIO_VOLUME, 0);
   Config::SetBase(Config::MAIN_INPUT_BACKGROUND_INPUT,
                   impl->config.input.background_input);
 
@@ -335,6 +733,19 @@ Runtime::~Runtime() {
   if (m_impl->booted) {
     Core::Stop(Core::System::GetInstance());
     Core::Shutdown(Core::System::GetInstance());
+  }
+  if (m_impl->automation_thread.joinable()) {
+    m_impl->automation_thread.request_stop();
+    m_impl->automation_thread.join();
+  }
+  m_impl->present_hook = {};
+  if (m_impl->automation_registered) {
+    for (int port = 0; port < 4; ++port)
+    {
+      ciface::Touch::UnregisterGameCubeInputOverrider(port);
+      ciface::Touch::UnregisterWiiInputOverrider(port);
+    }
+    m_impl->automation_registered = false;
   }
   m_impl->state_hook = {};
   if (m_impl->controllers_initialized)
@@ -391,6 +802,20 @@ RuntimeRunResult Runtime::Run() {
                          "Dolphin could not boot sys/main.dol"}};
   }
   m_impl->booted = true;
+  // Frame/present counters the harness reads out of status.txt.
+  m_impl->present_hook =
+      GetVideoEvents().after_present_event.Register([this](const PresentInfo &info) {
+        m_impl->automation_state.frame_count.store(info.frame_count,
+                                                   std::memory_order_relaxed);
+        m_impl->automation_state.present_count.store(info.present_count,
+                                                     std::memory_order_relaxed);
+      });
+  if (!m_impl->config.automation.directory.empty()) {
+    m_impl->automation_thread =
+        std::jthread([this](std::stop_token stop_token) {
+          AutomationLoop(*this, *m_impl, std::move(stop_token));
+        });
+  }
   std::jthread title_thread;
   if (!m_impl->config.headless && m_impl->config.show_fps_in_title) {
     title_thread = std::jthread([](std::stop_token stop_token) {

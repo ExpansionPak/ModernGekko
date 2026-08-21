@@ -122,8 +122,16 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     set(LINUX_LOCAL_DEV ON CACHE BOOL "" FORCE)
     set(DISTRIBUTOR "ModernGekko" CACHE STRING "" FORCE)
     add_subdirectory(vendor/dolphin EXCLUDE_FROM_ALL)
-    target_sources(core PRIVATE
+    # cpu_exception.c is C, but Dolphin's `core` forces its shared C++
+    # precompiled header (Source/PCH: /Yupch.h /FIpch.h) onto every source in
+    # the target, which MSVC rejects for a C translation unit (C1853), and the
+    # forced include cannot be dropped per-source. It needs nothing but
+    # GXRuntime's core/cpu.h, so give it its own target and link it in.
+    add_library(moderngekko_gxruntime_core STATIC
         vendor/dolphin/GXRuntime/src/core/cpu_exception.c)
+    target_include_directories(moderngekko_gxruntime_core PUBLIC
+        "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+    target_link_libraries(core PRIVATE moderngekko_gxruntime_core)
     target_include_directories(core PRIVATE
         "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
     if(MODERNGEKKO_FRONTEND_SDK)
@@ -219,6 +227,11 @@ target_compile_features(moderngekko_dolphin_video PUBLIC cxx_std_23)
 if(MSVC)
     target_compile_options(moderngekko_dolphin_video PUBLIC /Zc:preprocessor)
     target_compile_definitions(moderngekko_dolphin_video PUBLIC UNICODE _UNICODE)
+    # Dolphin's Common/StringUtil.h picks its TStrToUTF8/UTF8ToTStr overloads on
+    # _UNICODE; the non-_UNICODE branch returns a string_view as a std::string
+    # and does not compile. Dolphin's own targets define these, so every target
+    # of ours that includes its headers must too.
+    target_compile_definitions(moderngekko PUBLIC UNICODE _UNICODE)
 endif()
 target_include_directories(moderngekko_dolphin_video
     PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include"
@@ -237,9 +250,13 @@ target_link_libraries(moderngekko PUBLIC ModernGekko::ABI PRIVATE fmt::fmt)
 if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     target_sources(moderngekko PRIVATE
         src/runtime/dolphin_runtime.cpp
+        # Benchmark automation protocol (status.txt + commands/), used by
+        # dolphin_runtime.cpp; the header lives beside it under tools/.
+        tools/automation_protocol.cpp
         vendor/dolphin/Source/Core/DolphinNoGUI/Platform.cpp
         vendor/dolphin/Source/Core/DolphinNoGUI/PlatformHeadless.cpp
     )
+    target_include_directories(moderngekko PRIVATE "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     if(WIN32)
         target_sources(moderngekko PRIVATE
             vendor/dolphin/Source/Core/DolphinNoGUI/PlatformWin32.cpp)
@@ -405,6 +422,7 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     endif()
     add_executable(moderngekko-run
         tools/moderngekko_run.cpp
+        tools/automation_protocol.cpp
         tools/netplay_compatibility.cpp
         tools/netplay_session.cpp
         tools/frontend_config.cpp
@@ -590,8 +608,12 @@ if(MODERNGEKKO_ENABLE_DOLPHIN_RUNTIME)
     endif()
     add_dependencies(moderngekko-launcher moderngekko-run)
 
-    add_executable(moderngekko-port tools/moderngekko_port.cpp)
+    add_executable(moderngekko-port
+        tools/moderngekko_port.cpp
+        tools/pgo_support.cpp)
     target_link_libraries(moderngekko-port PRIVATE ModernGekko::Runtime)
+    target_include_directories(moderngekko-port PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
     target_compile_definitions(moderngekko-port PRIVATE
         MODERNGEKKO_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
     if(DOLRECOMP_ENABLE_LLVM)
@@ -668,6 +690,27 @@ if(BUILD_TESTING)
     target_compile_features(moderngekko_launcher_savestates_test PRIVATE cxx_std_23)
     add_test(NAME moderngekko.launcher_savestates
              COMMAND moderngekko_launcher_savestates_test)
+
+    # The PGO helpers deliberately depend on nothing but the standard library
+    # and the header-only digest, so this runs in the fast cross-platform job
+    # rather than waiting on a Dolphin link.
+    add_executable(moderngekko_pgo_support_test
+        tests/pgo_support_test.cpp
+        tools/pgo_support.cpp)
+    target_include_directories(moderngekko_pgo_support_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools"
+        "${CMAKE_CURRENT_SOURCE_DIR}/include")
+    target_compile_features(moderngekko_pgo_support_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.pgo_support COMMAND moderngekko_pgo_support_test)
+
+    add_executable(moderngekko_port_command_line_test
+        tests/port_command_line_test.cpp
+        tools/pgo_support.cpp)
+    target_include_directories(moderngekko_port_command_line_test PRIVATE
+        "${CMAKE_CURRENT_SOURCE_DIR}/tools")
+    target_compile_features(moderngekko_port_command_line_test PRIVATE cxx_std_23)
+    add_test(NAME moderngekko.port_command_line
+             COMMAND moderngekko_port_command_line_test)
 
     add_executable(moderngekko_frontend_config_gamecube_test
         tests/frontend_config_test.cpp
