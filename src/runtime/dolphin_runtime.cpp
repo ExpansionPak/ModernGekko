@@ -32,6 +32,7 @@
 #include <cmath>
 #include <cstddef>
 #include <cstdio>
+#include <cstdlib>
 #include <fmt/format.h>
 #include <mutex>
 #include <thread>
@@ -84,6 +85,33 @@ std::string FormatWindowTitle(const std::string &title, double fps) {
   }
   return fmt::format("{} | Net wait {:.1f} ms/s | Buffer {}", formatted_title,
                      s_net_wait_ms_per_second, telemetry.buffer_size);
+}
+
+// StaticRecomp is the default core, and the runtime otherwise pins it
+// unconditionally. Setting MODERNGEKKO_STATICRECOMP=0 selects Dolphin's own JIT
+// instead, which makes the two cores measurable against each other on one
+// build, one host and one savestate.
+//
+// This mirrors MODERNGEKKO_ARM64_STATICRECOMP, which does the same job on
+// arm64. That one has to work inside JitArm64 because there StaticRecomp is the
+// core and the JIT is its fallback; on x86-64 the core itself can simply be
+// swapped, so this stays out of the JIT entirely.
+//
+// The JIT needs no native module, so pair this with --allow-interpreter and no
+// --module. Leaving a module loaded would not change the core selected here,
+// but it would leave the comparison ambiguous about what actually ran.
+PowerPC::CPUCore SelectCPUCore() {
+  static const bool static_recomp = [] {
+    const char *v = std::getenv("MODERNGEKKO_STATICRECOMP");
+    return !v || !*v || *v != '0';
+  }();
+  if (static_recomp)
+    return PowerPC::CPUCore::StaticRecomp;
+#ifdef _M_ARM_64
+  return PowerPC::CPUCore::JITARM64;
+#else
+  return PowerPC::CPUCore::JIT64;
+#endif
 }
 } // namespace
 
@@ -273,7 +301,7 @@ RuntimeCreateResult Runtime::Create(RuntimeConfig config) {
   impl->controllers_initialized = true;
   impl->platform->SetTitle(impl->title);
 
-  Config::SetBase(Config::MAIN_CPU_CORE, PowerPC::CPUCore::StaticRecomp);
+  Config::SetBase(Config::MAIN_CPU_CORE, SelectCPUCore());
   if (!impl->config.graphics.backend.empty())
     Config::SetBase(Config::MAIN_GFX_BACKEND, impl->config.graphics.backend);
   else if (impl->config.headless)
