@@ -800,6 +800,11 @@ if(BUILD_TESTING)
         target_include_directories(moderngekko_cpu_abi_conformance_test PRIVATE
             "${CMAKE_CURRENT_SOURCE_DIR}/include"
             "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+        # _Static_assert needs C11. MSVC defaults to an older mode and rejects it
+        # outright, so ask for the standard rather than relying on the default.
+        set_target_properties(moderngekko_cpu_abi_conformance_test PROPERTIES
+            C_STANDARD 11
+            C_STANDARD_REQUIRED ON)
         add_test(NAME moderngekko.cpu_abi_conformance
                  COMMAND moderngekko_cpu_abi_conformance_test)
     else()
