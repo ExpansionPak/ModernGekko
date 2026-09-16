@@ -1,3 +1,11 @@
+/* NOTE: DOLRECOMP_CPU_H is shared with GXRuntime's core/cpu.h by design --
+ * the two headers define the same struct, and the guard keeps a translation
+ * unit that reaches for both from seeing two definitions. They must therefore
+ * stay byte-compatible; tests/cpu_abi_conformance_test.c enforces that.
+ * The version macro lives outside the guard so it survives either ordering.
+ */
+#include "cpu_abi_version.h"
+
 #ifndef DOLRECOMP_CPU_H
 #define DOLRECOMP_CPU_H
 
@@ -8,8 +16,9 @@
 extern "C" {
 #endif
 
-#define MODERNGEKKO_CPU_ABI_VERSION 4u
+#ifndef GXRUNTIME_CPU_ABI_VERSION
 #define GXRUNTIME_CPU_ABI_VERSION MODERNGEKKO_CPU_ABI_VERSION
+#endif
 
 typedef struct CPUState CPUState;
 

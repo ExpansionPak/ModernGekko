@@ -788,6 +788,30 @@ if(BUILD_TESTING)
     add_test(NAME moderngekko.module_abi
              COMMAND moderngekko_module_abi_test)
 
+    # Checks the vendored GXRuntime CPUState against the ABI version ModernGekko
+    # publishes. The two headers share the DOLRECOMP_CPU_H guard, so drift between
+    # them is invisible to every other target; this one compiles the GXRuntime
+    # header on its own so a mismatch fails the build instead of surfacing as a
+    # "CPU ABI mismatch" module rejection at run time.
+    if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include/core/cpu.h")
+        add_executable(moderngekko_cpu_abi_conformance_test
+            tests/cpu_abi_conformance_test.c
+        )
+        target_include_directories(moderngekko_cpu_abi_conformance_test PRIVATE
+            "${CMAKE_CURRENT_SOURCE_DIR}/include"
+            "${CMAKE_CURRENT_SOURCE_DIR}/vendor/dolphin/GXRuntime/include")
+        # _Static_assert needs C11. MSVC defaults to an older mode and rejects it
+        # outright, so ask for the standard rather than relying on the default.
+        set_target_properties(moderngekko_cpu_abi_conformance_test PROPERTIES
+            C_STANDARD 11
+            C_STANDARD_REQUIRED ON)
+        add_test(NAME moderngekko.cpu_abi_conformance
+                 COMMAND moderngekko_cpu_abi_conformance_test)
+    else()
+        message(STATUS
+            "vendor/dolphin is not checked out; skipping the CPU ABI conformance test")
+    endif()
+
     add_library(moderngekko_test_module SHARED
         tests/fixtures/test_module.c
     )
