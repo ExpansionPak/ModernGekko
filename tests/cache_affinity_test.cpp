@@ -4,6 +4,8 @@
 // hand and the selection rule is checked against it.
 #include "cache_affinity.hpp"
 
+#if defined(_WIN32)
+
 #include <cstring>
 #include <vector>
 
@@ -194,3 +196,114 @@ int main() {
 
   return 0;
 }
+
+#elif defined(__linux__)
+
+// The Linux rule reads sysfs, so the interesting topologies are supplied as a
+// fixture tree rather than by the machine running the test -- same reason the
+// Windows half is handed a synthetic buffer.
+#include <filesystem>
+#include <fstream>
+#include <string>
+
+namespace {
+namespace fs = std::filesystem;
+using moderngekko::frontend::CacheDomain;
+using moderngekko::frontend::LargestSharedCache;
+using moderngekko::frontend::ParseCacheSize;
+using moderngekko::frontend::ParseCpuList;
+
+void Write(const fs::path &path, const std::string &text) {
+  fs::create_directories(path.parent_path());
+  std::ofstream(path) << text << '\n';
+}
+
+// One cache record as the kernel lays it out: per-CPU directories, each listing
+// every cache that CPU can see.
+void AddCache(const fs::path &root, int cpu, int index, int level,
+              const std::string &size, const std::string &shared) {
+  const fs::path dir =
+      root / ("cpu" + std::to_string(cpu)) / "cache" / ("index" + std::to_string(index));
+  Write(dir / "level", std::to_string(level));
+  Write(dir / "size", size);
+  Write(dir / "shared_cpu_list", shared);
+}
+} // namespace
+
+int main() {
+  if (ParseCpuList("0-5,12-17") !=
+      std::vector<int>{0, 1, 2, 3, 4, 5, 12, 13, 14, 15, 16, 17})
+    return 1;
+  if (ParseCpuList("3") != std::vector<int>{3})
+    return 2;
+  if (ParseCpuList("0-2,7") != std::vector<int>{0, 1, 2, 7})
+    return 3;
+  // Trailing newline is what actually comes back from sysfs.
+  if (ParseCpuList("0-1\n") != std::vector<int>{0, 1})
+    return 4;
+  // Malformed input yields nothing rather than a partial list: pinning to a
+  // wrong domain is worse than not pinning.
+  if (!ParseCpuList("").empty() || !ParseCpuList("2-1").empty() ||
+      !ParseCpuList("0,,3").empty() || !ParseCpuList("a-b").empty() ||
+      !ParseCpuList("0-").empty())
+    return 5;
+
+  if (ParseCacheSize("32768K") != 32768ull * 1024)
+    return 6;
+  if (ParseCacheSize("32M") != 32ull * 1024 * 1024)
+    return 7;
+  if (ParseCacheSize("512") != 512)
+    return 8;
+  if (ParseCacheSize("") != 0 || ParseCacheSize("K") != 0 || ParseCacheSize("12X") != 0)
+    return 9;
+
+  const fs::path root = fs::temp_directory_path() / "mg_cache_affinity_test";
+  std::error_code ec;
+  fs::remove_all(root, ec);
+
+  // A 5900X-shaped part: two equal CCDs, 32 MB each. Either is a valid answer;
+  // what matters is that one whole domain wins rather than a mix.
+  for (int cpu = 0; cpu < 4; cpu++) {
+    AddCache(root, cpu, 0, 1, "32K", std::to_string(cpu));
+    AddCache(root, cpu, 3, 3, "32768K", cpu < 2 ? "0-1" : "2-3");
+  }
+  {
+    const CacheDomain domain = LargestSharedCache(root);
+    if (!domain || domain.size != 32768ull * 1024)
+      return 10;
+    if (domain.cpus != std::vector<int>{0, 1} && domain.cpus != std::vector<int>{2, 3})
+      return 11;
+  }
+
+  // Now make one die's cache larger, as a V-Cache part does. The rule must pick
+  // that die specifically, not merely some die.
+  AddCache(root, 2, 3, 3, "98304K", "2-3");
+  AddCache(root, 3, 3, 3, "98304K", "2-3");
+  {
+    const CacheDomain domain = LargestSharedCache(root);
+    if (!domain || domain.cpus != std::vector<int>{2, 3})
+      return 12;
+    if (domain.size != 98304ull * 1024)
+      return 13;
+  }
+
+  // No level-3 entries at all: nothing to pin to, and that is not an error.
+  fs::remove_all(root, ec);
+  AddCache(root, 0, 0, 1, "32K", "0");
+  if (LargestSharedCache(root))
+    return 14;
+
+  // A missing tree behaves the same way rather than throwing.
+  fs::remove_all(root, ec);
+  if (LargestSharedCache(root / "absent"))
+    return 15;
+
+  fs::remove_all(root, ec);
+  return 0;
+}
+
+#else
+
+int main() { return 0; }
+
+#endif

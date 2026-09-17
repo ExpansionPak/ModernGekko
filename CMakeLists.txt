@@ -882,8 +882,10 @@ if(BUILD_TESTING)
     add_test(NAME moderngekko.cpu_primitives
              COMMAND moderngekko_cpu_primitives_test)
 
-    if(WIN32)
-        # Header-only, and Windows-only like the rule it covers.
+    if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        # Header-only, and built wherever the rule it covers has an
+        # implementation. On other platforms the test is a no-op main, so there
+        # is nothing to run.
         add_executable(moderngekko_cache_affinity_test
             tests/cache_affinity_test.cpp)
         target_include_directories(moderngekko_cache_affinity_test PRIVATE

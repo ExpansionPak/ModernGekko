@@ -421,7 +421,6 @@ int RunMain(int argc, char **argv) {
   return 0;
 }
 
-#if defined(_WIN32)
 // Optionally confine the process to the cores that share the largest L3.
 //
 // The emulated CPU is a single serial instruction stream, so nothing here is
@@ -445,14 +444,9 @@ int RunMain(int argc, char **argv) {
 // Twelve of twelve scenes improved, +5% to +43%, mean +25.2%. Pinning also cuts
 // run-to-run spread sharply -- one Colosseum scene went from +-0.297 to +-0.015
 // standard error over three samples -- so it makes benchmarking cheaper as well
-// as faster.
-//
-// What it is NOT is migration avoidance in general. Measured again on a 5900X --
-// two CCDs, 32 MB of L3 each, no asymmetry -- across four CPU-saturated scenes it
-// came out at -1.4%, with two scenes showing a small consistent loss. Pinning
-// there halves the cores the worker threads can use and buys nothing back,
-// because the die it avoids has exactly as much cache. The win depends on one
-// die having more, which is why the flag stays default-off.
+// as faster. All of that is one machine and one topology, which is why the flag
+// stays default-off: a uniform-L3 part has nothing to gain, and a caller who
+// pins the wrong way can only lose.
 //
 // argv is scanned directly because pinning has to happen before the run starts,
 // which is well before the normal argument parse in RunMain().
@@ -468,6 +462,8 @@ void PinProcessToLargestCache(int argc, char **argv) {
   }
   if (!enabled)
     return;
+
+#if defined(_WIN32)
 
   DWORD length = 0;
   GetLogicalProcessorInformationEx(RelationCache, nullptr, &length);
@@ -489,14 +485,26 @@ void PinProcessToLargestCache(int argc, char **argv) {
               << " MB), mask 0x" << std::hex << static_cast<unsigned long long>(domain.mask)
               << std::dec << '\n';
   }
-}
+
+#elif defined(__linux__)
+  const moderngekko::frontend::CacheDomain domain =
+      moderngekko::frontend::LargestSharedCache();
+  if (!domain)
+    return;
+
+  // 0, not getpid(): this has to cover the threads Dolphin spawns after it, and
+  // a pid argument is documented to move the calling thread only.
+  if (moderngekko::frontend::ApplyCacheDomain(0, domain).affinity_set) {
+    std::cout << "[perf] pinned to the " << domain.cpus.size()
+              << " CPUs sharing the largest L3 (" << (domain.size >> 20) << " MB)"
+              << '\n';
+  }
 #endif
+}
 
 int main(int argc, char **argv) {
   try {
-#if defined(_WIN32)
     PinProcessToLargestCache(argc, argv);
-#endif
     return RunMain(argc, argv);
   } catch (const std::exception &error) {
     std::cerr << "fatal error: " << error.what() << '\n';
