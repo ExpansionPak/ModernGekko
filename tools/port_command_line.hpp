@@ -16,6 +16,7 @@ struct BuildOptions
   std::string toolchain = "auto";
   std::string opt_level;
   std::string backend;
+  bool state_in_memory = false;
   fs::path output;
   std::vector<std::string> runner_arguments;
   pgo::PgoBuildOptions pgo;
@@ -80,6 +81,10 @@ inline CommandLine ParseCommandLine(int argc, const char* const* argv,
       parsed.build.toolchain = argv[++i];
     else if (argument == "--backend" && i + 1 < argc)
       parsed.build.backend = argv[++i];
+    else if (argument == "--state-in-memory")
+      parsed.build.state_in_memory = true;
+    else if (argument == "--no-state-in-memory")
+      parsed.build.state_in_memory = false;
     else if (argument == "--opt-level" && i + 1 < argc)
       parsed.build.opt_level = argv[++i];
     else if (argument == "--output" && i + 1 < argc)

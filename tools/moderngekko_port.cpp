@@ -675,6 +675,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
       std::to_string(MODERNGEKKO_MODULE_ABI_VERSION) + "|cpu-abi=" +
       std::to_string(MODERNGEKKO_CPU_ABI_VERSION) + "|" + compiler_identity + "|" +
       std::string(architecture) + "|" + flags + "|backend=" + options.backend +
+      (options.state_in_memory ? std::string("|state_in_memory=1") : std::string()) +
       "|patches=" + patches.fingerprint + "|dolrecomp_binary=" +
       *dolrecomp_hash + "|" + moderngekko::pgo::PgoCacheIdentity(options.pgo) +
       DolRecompCodegenIdentity();
@@ -710,6 +711,7 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
              << "architecture=" << architecture << '\n'
              << "flags=" << flags << '\n'
              << "backend=" << options.backend << '\n'
+             << "state_in_memory=" << (options.state_in_memory ? 1 : 0) << '\n'
              << "patches=" << patches.fingerprint << '\n';
     if (options.pgo.mode != moderngekko::pgo::PgoMode::Off)
       manifest << moderngekko::pgo::FormatPgoManifest(options.pgo, options.pgo_facts);
@@ -757,6 +759,8 @@ std::optional<fs::path> Build(const char* argv0, const fs::path& root,
   std::string generate = Quote(dolrecomp) + " -j" +
                          std::to_string(std::max(1u, std::thread::hardware_concurrency())) +
                          " --backend=" + options.backend + " ";
+  if (options.state_in_memory)
+    generate += "--state-in-memory ";
   if (game.platform == moderngekko::GamePlatform::GameCube)
     generate += "--cpu gekko --gamecube " + Quote(recomp_dol) + " " + Quote(generated_parent);
   else
@@ -1120,7 +1124,7 @@ int PgoRun(const char* argv0, const fs::path& root, BuildOptions options,
 void Usage()
 {
   std::cerr << "usage: moderngekko-port inspect <game-root>\n"
-               "       moderngekko-port build <game-root> [--backend c|llvm] [--toolchain auto|clang|gcc|msvc] [--opt-level 0-3] [--output path]\n"
+               "       moderngekko-port build <game-root> [--backend c|llvm] [--state-in-memory] [--toolchain auto|clang|gcc|msvc] [--opt-level 0-3] [--output path]\n"
                "       moderngekko-port run <game-root> [build options] [-- runner options]\n"
                "       moderngekko-port pgo-run <game-root> [--backend c|llvm] [--toolchain auto|clang] [--opt-level 0-3]\n"
                "               [--output path] [--profile-dir path] [--llvm-profdata path] [--keep-work]\n"
