@@ -48,7 +48,7 @@ void Usage() {
                "       [--user-dir <path>] [--title <text>] [--load-state <path>]\n"
                "       [--graphics <backend>] [--audio <backend>]\n"
                "       [--mods <directory>] [--no-mods]\n"
-               "       [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
+               "       [--fullscreen] [--wayland] [-X11] [--headless] [--allow-interpreter]\n"
                "       [--cache-affinity | --no-cache-affinity]\n"
                "       [--netplay-host | --netplay-join <host>] "
                "[--netplay-port <port>]\n"
@@ -195,6 +195,8 @@ int RunMain(int argc, char **argv) {
       config.audio.mute = true;
     else if (arg == "--automation-dir")
       config.automation.directory = value("--automation-dir");
+    else if (arg == "--fullscreen")
+      config.fullscreen = true;
     else if (arg == "--headless")
       config.headless = true;
     else if (arg == "--allow-interpreter")
